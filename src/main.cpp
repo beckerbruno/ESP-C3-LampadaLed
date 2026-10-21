@@ -262,72 +262,82 @@ static WebServer server(80);
 
 static const char PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html lang="pt-br"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Lampada LED</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Controle da lâmpada</title>
 <style>
-:root{color-scheme:light dark}
-body{font-family:system-ui,sans-serif;max-width:420px;margin:1rem auto;padding:0 1rem}
-label{display:block;margin-top:.9rem}
-input[type=range]{width:100%}
-input[type=color]{width:100%;height:3rem;border:0;padding:0}
-input:disabled{opacity:.4}
-.seg{display:flex;gap:.5rem;margin:1rem 0}
-.seg button{flex:1;padding:.6rem .3rem;border:2px solid #bbb;border-radius:8px;background:#fff;color:#222;font:inherit;cursor:pointer}
-.seg button.on{border-color:#1a73e8;background:#e8f0fe;color:#0b4fb3;font-weight:600}
-button.off{margin-top:1rem;padding:.6rem 1rem}
-@media (prefers-color-scheme:dark){
-.seg button{background:#222;color:#eee;border-color:#555}
-.seg button.on{border-color:#6aa3ff;background:#12306b;color:#cfe0ff}}
+:root{font-family:system-ui,-apple-system,sans-serif;color:#18202a;background:#f5f7fa;color-scheme:light}
+*{box-sizing:border-box}body{margin:0 auto;max-width:520px;padding:20px 16px 36px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}h1{font-size:1.35rem;margin:0}p{color:#647080;margin:.35rem 0 0;font-size:.9rem}
+.card{background:#fff;border:1px solid #e3e8ef;border-radius:20px;padding:16px;box-shadow:0 5px 18px #2538580b;margin-bottom:14px}
+.preview{height:112px;border-radius:14px;background:#000;box-shadow:inset 0 0 0 1px #ffffff30;display:grid;place-items:center;color:#fff;text-shadow:0 1px 3px #000;font-weight:600;margin-bottom:14px}
+.section-title{font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#667386;margin:0 0 10px}
+.presets{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.preset{border:1px solid #dfe5ec;background:#fff;border-radius:12px;padding:8px 3px;font:inherit;font-size:.72rem;color:#354052;cursor:pointer}.preset:active{transform:scale(.97)}.swatch{height:31px;width:31px;border-radius:50%;margin:0 auto 5px;box-shadow:inset 0 0 0 1px #0001}.preset.selected{border:2px solid #3478f6;padding:7px 2px;background:#eef4ff}
+.manual-head{display:flex;justify-content:space-between;align-items:center;cursor:pointer}.manual-head button{border:0;background:none;color:#3478f6;font-weight:600;font-size:.9rem}.manual-body{margin-top:14px}.manual-body[hidden]{display:none}
+label{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:center;margin:14px 0;font-size:.9rem}label b{text-align:right;font-size:.78rem;color:#697586}input[type=range]{width:100%;accent-color:#3478f6}input[type=color]{width:100%;height:42px;border:0;border-radius:10px;padding:0;background:none;cursor:pointer}
+.actions{display:flex;gap:8px}.actions button,.mode button{flex:1;border:2px solid #d9e0e8;border-radius:11px;padding:11px 8px;background:#fff;color:#293444;font:inherit;font-weight:600;cursor:pointer}.actions .danger{background:#fff1f1;color:#c43131;border-color:#ffd3d3}.mode{display:flex;gap:8px}.mode button.on{background:#eaf2ff;color:#2364c8;border-color:#3478f6}
+input:disabled,.preset:disabled{opacity:.4;cursor:not-allowed}
+@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.preset,.actions button,.mode button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{background:#1b355e}.mode button.on{background:#1b355e;color:#cfe0ff;border-color:#6aa3ff}.preview{box-shadow:inset 0 0 0 1px #fff3}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
 </style></head><body>
-<h2>Lampada LED</h2>
-<div class="seg">
-<button id="m_manual" onclick="setMode('manual')">Manual</button>
-<button id="m_test" onclick="setMode('test')">Teste dos canais</button>
-<button id="m_demo" onclick="setMode('demo')">Demo de cores</button>
-</div>
-<input type="color" id="c" value="#ffffff">
-<div id="s"></div>
-<button class="off" onclick="off()">Apagar</button>
+<header><div><h1>Minha lâmpada</h1><p>Escolha uma cena ou ajuste manualmente</p></div><span id="status">● Manual</span></header>
+<section class="card"><h2 class="section-title">Modo</h2><div class="mode"><button id="m_manual" onclick="setMode('manual')">Manual</button><button id="m_test" onclick="setMode('test')">Teste dos canais</button><button id="m_demo" onclick="setMode('demo')">Demo de cores</button></div></section>
+<section class="card"><div class="preview" id="preview">Desligada</div><h2 class="section-title">Cores prontas</h2><div class="presets" id="presets"></div></section>
+<section class="card"><div class="manual-head" onclick="toggleManual()"><div><h2 class="section-title" style="margin:0">Ajuste manual</h2><p>RGB e temperatura do branco</p></div><button id="toggle">Mostrar</button></div><div class="manual-body" id="manual" hidden><input type="color" id="picker" aria-label="Escolher cor"><div id="sliders"></div></div></section>
+<section class="card"><h2 class="section-title">Brilho máximo</h2><label><span>Limite</span><input type="range" id="i_limit" min="0" max="100" oninput="changeLimit()"><b id="v_limit">0%</b></label></section>
+<div class="actions"><button class="danger" onclick="off()">Apagar</button></div>
 <script>
 const N=['r','g','b','ww','cw'];
-const L={r:'Vermelho',g:'Verde',b:'Azul',ww:'Branco quente',cw:'Branco frio',limit:'Limite de brilho (%)'};
-const el=k=>document.getElementById('i_'+k);
-let mode='manual',tCh,tLim;
-document.getElementById('s').innerHTML=[...N,'limit'].map(k=>
- '<label>'+L[k]+' <b id="v_'+k+'"></b><input type="range" id="i_'+k+'" min="0" max="'+(k=='limit'?100:255)+'" oninput="chg(\''+k+'\')"></label>').join('');
-function lab(k){document.getElementById('v_'+k).textContent=el(k).value}
-function api(q){return fetch(q).then(r=>r.json())}
+const labels={r:'Vermelho',g:'Verde',b:'Azul',ww:'Branco quente',cw:'Branco frio'};
+const names={manual:'Manual',demo:'Demo',test:'Teste'};
+const presets=[['Quente','#ff7a24',[255,70,0,0,0]],['Relaxar','#ffb347',[255,150,0,30,0]],['Natureza','#51c878',[20,255,80,0,0]],['Oceano','#2389da',[0,100,255,0,0]],['Noite','#7d4dcc',[80,0,255,0,0]],['Neutro','#ffffff',[0,0,0,110,145]],['Leitura','#fff5d6',[0,0,0,210,70]],['Festa','#ff3b81',[255,0,120,0,0]],['Céu','#6ec6ff',[0,90,255,0,0]],['Luz baixa','#ffd6a0',[100,40,0,25,0]]];
+const $=id=>document.getElementById(id);
+const el=k=>$('i_'+k);
+let mode='manual',tCh,tLim,hold=0;
+$('presets').innerHTML=presets.map((p,i)=>`<button class="preset" onclick="applyPreset(${i})"><span class="swatch" style="background:${p[1]}"></span>${p[0]}</button>`).join('');
+$('sliders').innerHTML=N.map(k=>`<label><span>${labels[k]}</span><input type="range" id="i_${k}" min="0" max="255" oninput="changeColor()"><b id="v_${k}">0</b></label>`).join('');
+function api(q){return fetch(q+(q.includes('?')?'&':'?')+'_='+Date.now(),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})}
+function lab(k){$('v_'+k).textContent=k==='limit'?el(k).value+'%':el(k).value}
+function offline(){$('status').textContent='● Sem conexão'}
+function touch(){hold=Date.now()+1500}
+function paintMode(m){
+  mode=m;
+  $('status').textContent='● '+(names[m]||m);
+  document.querySelectorAll('.mode button').forEach(b=>{const on=b.id==='m_'+m;b.classList.toggle('on',on);b.setAttribute('aria-pressed',on)});
+  document.querySelectorAll('.preset,#picker,#sliders input').forEach(e=>e.disabled=m!=='manual');
+}
+function paintPreview(s){
+  const warm=[255,214,170],cool=[201,226,255];
+  const c=[0,1,2].map(i=>Math.min(255,Math.round(s[N[i]]+warm[i]*s.ww/255+cool[i]*s.cw/255)));
+  $('preview').style.background=`rgb(${c.join(',')})`;
+  $('preview').textContent=N.every(k=>s[k]===0)?'Desligada':'Ativa';
+  document.querySelectorAll('.preset').forEach((b,i)=>b.classList.toggle('selected',presets[i][2].every((v,j)=>v===s[N[j]])));
+}
+function localState(){const s={};N.forEach(k=>s[k]=+el(k).value);return s}
+function paintColors(s){
+  N.forEach(k=>{el(k).value=s[k];lab(k)});
+  el('limit').value=s.limit;lab('limit');
+  $('picker').value='#'+N.slice(0,3).map(k=>Number(s[k]).toString(16).padStart(2,'0')).join('');
+  paintPreview(s);
+}
 function show(s,force){
- const changed=s.mode!==mode;
- mode=s.mode;
- ['manual','test','demo'].forEach(m=>{
-  const b=document.getElementById('m_'+m);
-  b.classList.toggle('on',m==mode);
-  b.setAttribute('aria-pressed',m==mode);
- });
- const man=mode=='manual';
- N.forEach(k=>el(k).disabled=!man);
- document.getElementById('c').disabled=!man;
- if(!man||changed||force)N.forEach(k=>{el(k).value=s[k];lab(k)});
- if(changed||force){el('limit').value=s.limit;lab('limit')}
+  if(!force&&Date.now()<hold)return;
+  paintMode(s.mode);
+  paintColors(s);
 }
-function sendCh(){
- const q=N.map(k=>k+'='+el(k).value).join('&');
- clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+q).then(show),60);
+function send(){clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+N.map(k=>k+'='+el(k).value).join('&')).then(s=>show(s)).catch(offline),70)}
+function changeColor(){N.forEach(lab);touch();paintPreview(localState());send()}
+function changeLimit(){lab('limit');touch();clearTimeout(tLim);tLim=setTimeout(()=>api('/set?limit='+el('limit').value).then(s=>show(s)).catch(offline),70)}
+function applyPreset(i){const v=presets[i][2];N.forEach((k,j)=>el(k).value=v[j]);changeColor()}
+function setMode(m){
+  if(m===mode&&m!=='manual')m='manual';
+  if(m===mode)return;
+  paintMode(m);hold=Date.now()+2000;
+  api('/mode?m='+m).then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()});
 }
-function sendLimit(){
- clearTimeout(tLim);tLim=setTimeout(()=>api('/set?limit='+el('limit').value),60);
-}
-function chg(k){lab(k);k=='limit'?sendLimit():sendCh()}
-function setMode(m){if(m==mode&&m!='manual')m='manual';api('/mode?m='+m).then(s=>show(s))}
-function off(){N.forEach(k=>{el(k).value=0;lab(k)});api('/off').then(s=>show(s))}
-document.getElementById('c').oninput=e=>{
- const h=e.target.value;
- ['r','g','b'].forEach((k,i)=>{el(k).value=parseInt(h.substr(1+2*i,2),16);lab(k)});
- sendCh();
-};
-api('/state').then(s=>show(s,true));
-setInterval(()=>api('/state').then(s=>show(s)),1000);
+function off(){hold=Date.now()+2000;api('/off').then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()})}
+function toggleManual(){const x=$('manual');x.hidden=!x.hidden;$('toggle').textContent=x.hidden?'Mostrar':'Ocultar'}
+$('picker').oninput=e=>{N.slice(0,3).forEach((k,i)=>el(k).value=parseInt(e.target.value.substr(1+i*2,2),16));changeColor()};
+api('/state').then(s=>show(s,true)).catch(offline);
+setInterval(()=>api('/state').then(s=>show(s)).catch(offline),1500);
 </script></body></html>)HTML";
 
 static void sendState() {
@@ -344,6 +354,7 @@ static void sendState() {
   j += ",\"mode\":\"";
   j += modeName();
   j += "\"}";
+  server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", j);
 }
 
