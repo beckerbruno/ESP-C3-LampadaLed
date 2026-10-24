@@ -15,7 +15,7 @@
 #define PIN_CW  5    // branco frio (confirmado no teste)
 
 // PWM
-#define PWM_FREQ_HZ  10000   // acima do audivel e sem cintilar em camera
+#define PWM_FREQ_HZ  25000   // acima do audivel e sem cintilar em camera
 #define PWM_BITS     10      // 0..1023 (12 bits nao cabe: o clock do LEDC no C3 e 40 MHz, e a 10 kHz o maximo sao 11 bits)
 #define GAMMA_EXP    2.0f    // correcao simples de brilho percebido
 
