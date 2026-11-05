@@ -26,7 +26,7 @@ Firmware para controlar a lâmpada LED (painel M140-RGB-DB: R, G, B, branco quen
    pio device monitor
    ```
    Se o ESP não entrar em modo de gravação, segure BOOT, aperte RST e solte BOOT.
-4. Na serial, rode `test` (ou use o botão "Teste dos canais" na página): cada canal acende um por vez, com o GPIO impresso.
+4. Na serial, rode `test`: cada canal acende um por vez, com o GPIO impresso (`manual` para sair).
 5. **Limite de brilho:** começa em 25% (`DEFAULT_LIMIT_PCT`). Meça a corrente do painel com o multímetro em série e confira se os transistores ficam só mornos antes de subir com `limit 50`, `limit 100`.
 
 Se preferir a Arduino IDE: copie `src/main.cpp` para um sketch `.ino` junto com a pasta `include/`, escolha a placa "ESP32C3 Dev Module" e ligue "USB CDC On Boot".
@@ -51,12 +51,12 @@ Ele já começa percorrendo as cores, uma a cada 2 s, e imprime na serial o que 
 
 Os 5 primeiros passos acendem um canal isolado. Se a cor que acendeu não for a que a serial anunciou, troque os pinos em `include/config.h`. Depois vêm as misturas (amarelo, ciano, magenta, laranja e os dois brancos juntos).
 
-No firmware normal há três modos, um por vez: **Manual**, **Teste dos canais** e **Demo de cores**. Na página web o botão do modo ativo fica destacado; clicar de novo no botão ativo (ou em "Manual") volta ao controle manual, que restaura as cores que estavam nos sliders. Fora do modo Manual os sliders ficam desabilitados. Na serial: `test`, `demo` e `manual` (`demo off` e `test off` também voltam ao manual). Mexer em qualquer cor manualmente também volta ao modo Manual. O tempo de cada cor da demo fica em `DEMO_STEP_MS`, no `config.h`.
+A página web é só de controle manual. Os modos de diagnóstico (`test` e `demo`) existem apenas na serial; `manual` volta ao controle manual, e mexer em qualquer cor também volta.
 
 ## Controle
 
 - **Navegador:** `http://lampada.local` (ou o IP mostrado na serial): cor, cada canal e limite de brilho.
-- **HTTP:** `/set?r=255&g=0&b=80&ww=0&cw=0&limit=30`, `/off`, `/state` (inclui `"mode"`), `/mode?m=manual|test|demo`, `/test`, `/demo`.
+- **HTTP:** `/set?r=255&g=0&b=80&ww=0&cw=0&limit=30`, `/off`, `/state`, `/claude?state=...`.
 - **Serial (115200):** `r 128`, `g 0`, `b 255`, `ww 100`, `cw 100`, `all 0`, `limit 40`, `off`, `manual`, `test`, `demo`, `status`.
 
 ## Fase 2 (bateria)
@@ -79,3 +79,5 @@ O ESP mostra o estado do Claude Code por cima da cor atual, por tempo limitado. 
 - **Serial:** `claude ok`, `claude ask 30`, `claude off`.
 - **Tempos e chave:** defina `CLAUDE_OK_SECS`, `CLAUDE_ASK_SECS`, `CLAUDE_BUSY_SECS`, `CLAUDE_ERR_SECS` e `CLAUDE_KEY` no `config.h`.
 - **Hooks:** copie o bloco `"hooks"` de `claude-hooks.json` para `~/.claude/settings.json` (ou `.claude/settings.json` do projeto). O Claude Code precisa estar na mesma rede Wi-Fi da lâmpada.
+
+A página mostra, ao lado do título, uma etiqueta **Manual** ou **Claude · estado**. Quando há um aviso do Claude ativo, aparece também uma barra de progresso com o tempo restante, e a prévia mostra a cor do aviso. Sem prazo (`secs=0`), a barra pisca até o aviso ser cancelado.

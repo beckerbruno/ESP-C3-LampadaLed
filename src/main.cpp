@@ -65,6 +65,7 @@ static Mode curMode = MODE_MANUAL;
 static bool     ovActive = false;
 static uint8_t  ovVal[NUM_CH] = {0, 0, 0, 0, 0};
 static uint32_t ovUntil = 0;     // 0 = sem prazo (so some com "off")
+static uint32_t ovTotal = 0;     // duracao total do aviso em ms (0 = sem prazo)
 static char     ovName[8] = "";
 
 static const char* modeName() {
@@ -141,7 +142,8 @@ static bool claudeSet(const String& st, int secs) {
     if (!st.equals(c.name)) continue;
     for (uint8_t i = 0; i < NUM_CH; i++) ovVal[i] = c.v[i];
     int t   = secs >= 0 ? secs : c.secs;
-    ovUntil = t ? millis() + (uint32_t)t * 1000UL : 0;
+    ovTotal = (uint32_t)t * 1000UL;
+    ovUntil = t ? millis() + ovTotal : 0;
     if (t && ovUntil == 0) ovUntil = 1;
     strncpy(ovName, c.name, sizeof(ovName) - 1);
     ovName[sizeof(ovName) - 1] = 0;
@@ -362,12 +364,15 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
 .presets{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.preset{border:1px solid #dfe5ec;background:#fff;border-radius:12px;padding:8px 3px;font:inherit;font-size:.72rem;color:#354052;cursor:pointer}.preset:active{transform:scale(.97)}.swatch{height:31px;width:31px;border-radius:50%;margin:0 auto 5px;box-shadow:inset 0 0 0 1px #0001}.preset.selected{border:2px solid #3478f6;padding:7px 2px;background:#eef4ff}
 .manual-head{display:flex;justify-content:space-between;align-items:center;cursor:pointer}.manual-head button{border:0;background:none;color:#3478f6;font-weight:600;font-size:.9rem}.manual-body{margin-top:14px}.manual-body[hidden]{display:none}
 label{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:center;margin:14px 0;font-size:.9rem}label b{text-align:right;font-size:.78rem;color:#697586}input[type=range]{width:100%;accent-color:#3478f6}input[type=color]{width:100%;height:42px;border:0;border-radius:10px;padding:0;background:none;cursor:pointer}
-.actions{display:flex;gap:8px}.actions button,.mode button{flex:1;border:2px solid #d9e0e8;border-radius:11px;padding:11px 8px;background:#fff;color:#293444;font:inherit;font-weight:600;cursor:pointer}.actions .danger{background:#fff1f1;color:#c43131;border-color:#ffd3d3}.mode{display:flex;gap:8px}.mode button.on{background:#eaf2ff;color:#2364c8;border-color:#3478f6}
-input:disabled,.preset:disabled{opacity:.4;cursor:not-allowed}
-@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.preset,.actions button,.mode button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{background:#1b355e}.mode button.on{background:#1b355e;color:#cfe0ff;border-color:#6aa3ff}.preview{box-shadow:inset 0 0 0 1px #fff3}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
+.actions{display:flex;gap:8px}.actions button{flex:1;border:2px solid #d9e0e8;border-radius:11px;padding:11px 8px;background:#fff;color:#293444;font:inherit;font-weight:600;cursor:pointer}.actions .danger{background:#fff1f1;color:#c43131;border-color:#ffd3d3}.flag{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:#eef1f5;color:#3b4757;border:2px solid #dfe5ec;white-space:nowrap}
+.flag::before{content:"";width:9px;height:9px;border-radius:50%;background:#98a2b3}
+.flag.claude{border-color:var(--c);background:#fff;color:#18202a}.flag.claude::before{background:var(--c)}.flag.off::before{background:#d33}
+.cbar{margin:-6px 0 14px}.cbar[hidden]{display:none}.cinfo{display:flex;justify-content:space-between;font-size:.78rem;font-weight:600;color:#647080;margin-bottom:5px}
+.ctrack{height:8px;border-radius:4px;background:#e3e8ef;overflow:hidden}.cfill{height:100%;width:100%;background:var(--c,#888);border-radius:4px;transition:width .2s linear}.cfill.open{animation:pulse 1.4s ease-in-out infinite}@keyframes pulse{50%{opacity:.35}}
+@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.preset,.actions button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{background:#1b355e}.flag{background:#1b232d;border-color:#303b49;color:#e4eaf1}.flag.claude{background:#1b232d;color:#edf2f7}.ctrack{background:#303b49}.cinfo{color:#9aa7b8}.preview{box-shadow:inset 0 0 0 1px #fff3}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
 </style></head><body>
-<header><div><h1>Minha lâmpada</h1><p>Escolha uma cena ou ajuste manualmente</p></div><span id="status">● Manual</span></header>
-<section class="card"><h2 class="section-title">Modo</h2><div class="mode"><button id="m_manual" onclick="setMode('manual')">Manual</button><button id="m_test" onclick="setMode('test')">Teste dos canais</button><button id="m_demo" onclick="setMode('demo')">Demo de cores</button></div></section>
+<header><div><h1>Minha lâmpada</h1><p>Escolha uma cena ou ajuste manualmente</p></div><span id="flag" class="flag">Manual</span></header>
+<div class="cbar" id="claudebar" hidden><div class="cinfo"><span id="cname"></span><span id="ctime"></span></div><div class="ctrack"><div class="cfill" id="cfill"></div></div></div>
 <section class="card"><div class="preview" id="preview">Desligada</div><h2 class="section-title">Cores prontas</h2><div class="presets" id="presets"></div></section>
 <section class="card"><div class="manual-head" onclick="toggleManual()"><div><h2 class="section-title" style="margin:0">Ajuste manual</h2><p>RGB e temperatura do branco</p></div><button id="toggle">Mostrar</button></div><div class="manual-body" id="manual" hidden><input type="color" id="picker" aria-label="Escolher cor"><div id="sliders"></div></div></section>
 <section class="card"><h2 class="section-title">Brilho máximo</h2><label><span>Limite</span><input type="range" id="i_limit" min="0" max="100" oninput="changeLimit()"><b id="v_limit">0%</b></label></section>
@@ -375,23 +380,17 @@ input:disabled,.preset:disabled{opacity:.4;cursor:not-allowed}
 <script>
 const N=['r','g','b','ww','cw'];
 const labels={r:'Vermelho',g:'Verde',b:'Azul',ww:'Branco quente',cw:'Branco frio'};
-const names={manual:'Manual',demo:'Demo',test:'Teste'};
 const presets=[['Quente','#ff7a24',[255,70,0,0,0]],['Relaxar','#ffb347',[255,150,0,30,0]],['Natureza','#51c878',[20,255,80,0,0]],['Oceano','#2389da',[0,100,255,0,0]],['Noite','#7d4dcc',[80,0,255,0,0]],['Neutro','#ffffff',[0,0,0,110,145]],['Leitura','#fff5d6',[0,0,0,210,70]],['Festa','#ff3b81',[255,0,120,0,0]],['Céu','#6ec6ff',[0,90,255,0,0]],['Luz baixa','#ffd6a0',[100,40,0,25,0]]];
+const ovInfo={ok:['concluído','#22a355',[0,255,0]],ask:['precisa de você','#e6a100',[255,160,0]],busy:['trabalhando','#2f7bf6',[0,60,255]],err:['erro','#d33636',[255,0,0]]};
 const $=id=>document.getElementById(id);
 const el=k=>$('i_'+k);
-let mode='manual',tCh,tLim,hold=0;
+let tCh,tLim,hold=0,ov=null;
 $('presets').innerHTML=presets.map((p,i)=>`<button class="preset" onclick="applyPreset(${i})"><span class="swatch" style="background:${p[1]}"></span>${p[0]}</button>`).join('');
 $('sliders').innerHTML=N.map(k=>`<label><span>${labels[k]}</span><input type="range" id="i_${k}" min="0" max="255" oninput="changeColor()"><b id="v_${k}">0</b></label>`).join('');
 function api(q){return fetch(q+(q.includes('?')?'&':'?')+'_='+Date.now(),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})}
 function lab(k){$('v_'+k).textContent=k==='limit'?el(k).value+'%':el(k).value}
-function offline(){$('status').textContent='● Sem conexão'}
+function offline(){const f=$('flag');f.className='flag off';f.textContent='Sem conexão';f.style.removeProperty('--c');$('claudebar').hidden=true;ov=null}
 function touch(){hold=Date.now()+1500}
-function paintMode(m){
-  mode=m;
-  $('status').textContent='● '+(names[m]||m);
-  document.querySelectorAll('.mode button').forEach(b=>{const on=b.id==='m_'+m;b.classList.toggle('on',on);b.setAttribute('aria-pressed',on)});
-  document.querySelectorAll('.preset,#picker,#sliders input').forEach(e=>e.disabled=m!=='manual');
-}
 function paintPreview(s){
   const warm=[255,214,170],cool=[201,226,255];
   const c=[0,1,2].map(i=>Math.min(255,Math.round(s[N[i]]+warm[i]*s.ww/255+cool[i]*s.cw/255)));
@@ -406,31 +405,40 @@ function paintColors(s){
   $('picker').value='#'+N.slice(0,3).map(k=>Number(s[k]).toString(16).padStart(2,'0')).join('');
   paintPreview(s);
 }
-const ovNames={ok:'concluído',ask:'precisa de você',busy:'trabalhando',err:'erro'};
-function paintOv(s){
-  if(s.ov)$('status').textContent+=' · Claude: '+(ovNames[s.ov]||s.ov)+(s.ovLeft?' ('+s.ovLeft+'s)':'');
+function paintFlag(s){
+  const f=$('flag'),bar=$('claudebar');
+  if(!s.ov){ov=null;f.className='flag';f.textContent='Manual';f.style.removeProperty('--c');bar.hidden=true;return}
+  const i=ovInfo[s.ov]||[s.ov,'#888',[128,128,128]];
+  f.className='flag claude';f.style.setProperty('--c',i[1]);f.textContent='Claude · '+i[0];
+  bar.hidden=false;bar.style.setProperty('--c',i[1]);$('cname').textContent='Claude · '+i[0];
+  $('preview').style.background=`rgb(${i[2].join(',')})`;$('preview').textContent='Claude · '+i[0];
+  const end=Date.now()+s.ovMs;
+  if(!ov||ov.name!==s.ov||ov.total!==s.ovTotal||Math.abs(ov.end-end)>700)ov={name:s.ov,end:end,total:s.ovTotal};
+  tickBar();
+}
+function tickBar(){
+  if(!ov)return;
+  const fill=$('cfill');
+  if(!ov.total){fill.classList.add('open');fill.style.width='100%';$('ctime').textContent='sem prazo';return}
+  fill.classList.remove('open');
+  const left=Math.max(0,ov.end-Date.now());
+  fill.style.width=(left/ov.total*100)+'%';
+  $('ctime').textContent=Math.ceil(left/1000)+' s';
 }
 function show(s,force){
-  if(!force&&Date.now()<hold)return;
-  paintMode(s.mode);
-  paintColors(s);
-  paintOv(s);
+  if(force||Date.now()>=hold)paintColors(s);
+  paintFlag(s);
 }
 function send(){clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+N.map(k=>k+'='+el(k).value).join('&')).then(s=>show(s)).catch(offline),70)}
 function changeColor(){N.forEach(lab);touch();paintPreview(localState());send()}
 function changeLimit(){lab('limit');touch();clearTimeout(tLim);tLim=setTimeout(()=>api('/set?limit='+el('limit').value).then(s=>show(s)).catch(offline),70)}
 function applyPreset(i){const v=presets[i][2];N.forEach((k,j)=>el(k).value=v[j]);changeColor()}
-function setMode(m){
-  if(m===mode&&m!=='manual')m='manual';
-  if(m===mode)return;
-  paintMode(m);hold=Date.now()+2000;
-  api('/mode?m='+m).then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()});
-}
 function off(){hold=Date.now()+2000;api('/off').then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()})}
 function toggleManual(){const x=$('manual');x.hidden=!x.hidden;$('toggle').textContent=x.hidden?'Mostrar':'Ocultar'}
 $('picker').oninput=e=>{N.slice(0,3).forEach((k,i)=>el(k).value=parseInt(e.target.value.substr(1+i*2,2),16));changeColor()};
 api('/state').then(s=>show(s,true)).catch(offline);
-setInterval(()=>api('/state').then(s=>show(s)).catch(offline),1500);
+setInterval(()=>api('/state').then(s=>show(s)).catch(offline),1000);
+setInterval(tickBar,200);
 </script></body></html>)HTML";
 
 static void sendState() {
@@ -448,9 +456,11 @@ static void sendState() {
   j += modeName();
   j += "\",\"ov\":\"";
   j += ovActive ? ovName : "";
-  j += "\",\"ovLeft\":";
+  j += "\",\"ovMs\":";
   int32_t left = (ovActive && ovUntil) ? (int32_t)(ovUntil - millis()) : 0;
-  j += (unsigned int)(left > 0 ? left / 1000 + 1 : 0);
+  j += (unsigned int)(left > 0 ? left : 0);
+  j += ",\"ovTotal\":";
+  j += (unsigned int)(ovActive ? ovTotal : 0);
   j += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", j);
@@ -460,14 +470,6 @@ static void handleSet() {
   for (uint8_t i = 0; i < NUM_CH; i++)
     if (server.hasArg(ch[i].name)) setValue(i, server.arg(ch[i].name).toInt());
   if (server.hasArg("limit")) setLimit(server.arg("limit").toInt());
-  sendState();
-}
-
-static void handleMode() {
-  String m = server.arg("m");
-  if (m == "demo")      setMode(MODE_DEMO);
-  else if (m == "test") setMode(MODE_TEST);
-  else                  setMode(MODE_MANUAL);
   sendState();
 }
 
@@ -539,11 +541,8 @@ void setup() {
   server.on("/", []() { server.send_P(200, "text/html", PAGE); });
   server.on("/set", handleSet);
   server.on("/state", sendState);
-  server.on("/mode", handleMode);
   server.on("/claude", handleClaude);
   server.on("/off", []() { allOff(); sendState(); });
-  server.on("/test", []() { setMode(MODE_TEST); sendState(); });
-  server.on("/demo", []() { setMode(MODE_DEMO); sendState(); });
   server.begin();
 
   Serial.println(HELP);
