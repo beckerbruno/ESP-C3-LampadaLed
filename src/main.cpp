@@ -9,6 +9,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
+#include <time.h>
 #include <math.h>
 #include "config.h"
 
@@ -82,6 +84,31 @@ static uint32_t ovUntil = 0;     // 0 = sem prazo (so some com "off")
 static uint32_t ovTotal = 0;     // duracao total do aviso em ms (0 = sem prazo)
 static char     ovName[8] = "";
 
+// ------------------------------------------- Automacao por horario (NTP) ----
+// Hora vem da internet (NTP) quando o ESP esta no Wi-Fi; sem Wi-Fi nao ha hora e a
+// agenda fica inativa. A agenda fica gravada na memoria (Preferences).
+#ifndef TZ_POSIX
+#define TZ_POSIX "<-03>3"        // Brasilia, sem horario de verao
+#endif
+#ifndef NIGHT_RAMP_MIN
+#define NIGHT_RAMP_MIN 30        // transicao suave do brilho da noite (minutos)
+#endif
+
+struct Sched {
+  bool     aEn;  uint16_t aMin; uint8_t aDays; uint8_t aRamp; uint8_t aScene[NUM_CH];  // acender
+  bool     pEn;  uint16_t pMin; uint8_t pDays; uint8_t pFade;                          // apagar
+  bool     nEn;  uint16_t nFrom; uint16_t nTo; uint8_t nPct;                           // noite
+};
+static Sched sc = {false, 7 * 60, 0x7F, 20, {255, 150, 0, 30, 0},
+                   false, 23 * 60 + 30, 0x7F, 0,
+                   false, 22 * 60, 6 * 60, 30};
+
+enum AutoKind : uint8_t { AUTO_NONE, AUTO_WAKE, AUTO_SLEEP };
+static AutoKind autoKind   = AUTO_NONE;
+static uint32_t autoStart  = 0, autoDur = 0;  // ms
+static float    autoFactor = 1.0f;            // 0..1 sobre a cor atual (acordar/dormir)
+static float    nightFactor = 1.0f;           // 0..1 do brilho da noite
+
 static const char* modeName() {
   return curMode == MODE_DEMO ? "demo" : curMode == MODE_TEST ? "test" : "manual";
 }
@@ -108,7 +135,9 @@ static void pwmWrite(uint8_t idx, uint8_t pin, uint32_t duty) {
 }
 
 static void applyChannel(uint8_t i) {
-  float   x   = (ovActive ? ovVal[i] : ch[i].value) / 255.0f;
+  float   base = ovActive ? (float)ovVal[i] : ch[i].value * autoFactor;
+  float   x   = base / 255.0f * nightFactor;
+  if (x > 1.0f) x = 1.0f;
   uint8_t lim = limitPct;
   if (ovActive && lim == 0) lim = DEFAULT_LIMIT_PCT;  // aviso aparece mesmo com limite 0
   float duty = powf(x, GAMMA_EXP) * (lim / 100.0f);
@@ -167,6 +196,187 @@ static bool claudeSet(const String& st, int secs) {
     return true;
   }
   return false;
+}
+
+
+// ---------------------------------------------------- Acordar / dormir ----
+static void zeroColors() {  // apaga a cor atual sem mexer no aviso do Claude
+  curMode = MODE_MANUAL;
+  for (uint8_t i = 0; i < NUM_CH; i++) manualVal[i] = ch[i].value = 0;
+  applyAll();
+}
+
+static void autoCancel() {  // volta ao brilho total da cor atual
+  if (autoKind == AUTO_NONE) return;
+  autoKind   = AUTO_NONE;
+  autoFactor = 1.0f;
+  applyAll();
+}
+
+static void autoWake(const uint8_t* scene, uint8_t rampMin) {
+  curMode = MODE_MANUAL;
+  for (uint8_t i = 0; i < NUM_CH; i++) manualVal[i] = ch[i].value = scene[i];
+  if (rampMin == 0) {
+    autoKind   = AUTO_NONE;
+    autoFactor = 1.0f;
+  } else {
+    autoKind   = AUTO_WAKE;
+    autoStart  = millis();
+    autoDur    = (uint32_t)rampMin * 60000UL;
+    autoFactor = 0.0f;
+  }
+  applyAll();
+  Serial.printf("Acender: subindo em %u min\n", (unsigned)rampMin);
+}
+
+static void autoSleep(uint8_t minutes) {  // 0 = apaga na hora
+  if (minutes == 0) {
+    autoKind   = AUTO_NONE;
+    autoFactor = 1.0f;
+    zeroColors();
+    return;
+  }
+  bool any = false;
+  for (uint8_t i = 0; i < NUM_CH; i++) any = any || ch[i].value;
+  if (!any) return;  // nada aceso para apagar
+  autoKind   = AUTO_SLEEP;
+  autoStart  = millis();
+  autoDur    = (uint32_t)minutes * 60000UL;
+  autoFactor = 1.0f;
+  Serial.printf("Dormir: apagando em %u min\n", (unsigned)minutes);
+}
+
+static void autoTick() {
+  if (autoKind == AUTO_NONE) return;
+  uint32_t el = millis() - autoStart;
+  if (el >= autoDur) {
+    bool sleeping = autoKind == AUTO_SLEEP;
+    autoKind   = AUTO_NONE;
+    autoFactor = 1.0f;
+    if (sleeping) {
+      zeroColors();
+      Serial.println("Dormir: apagada.");
+    } else {
+      applyAll();
+      Serial.println("Acender: cena completa.");
+    }
+    return;
+  }
+  float f  = (float)el / (float)autoDur;
+  float nf = autoKind == AUTO_WAKE ? f : 1.0f - f;
+  if (fabsf(nf - autoFactor) > 0.003f) {
+    autoFactor = nf;
+    applyAll();
+  }
+}
+
+// ------------------------------------------------------ Agenda por horario ----
+static Preferences prefs;
+
+static void schedLoad() {
+  if (!prefs.begin("lampada", false)) return;
+  sc.aEn   = prefs.getUChar("aEn", 0) != 0;
+  sc.aMin  = prefs.getUShort("aMin", sc.aMin);
+  sc.aDays = prefs.getUChar("aDays", sc.aDays);
+  sc.aRamp = prefs.getUChar("aRamp", sc.aRamp);
+  if (prefs.getBytesLength("aScene") == NUM_CH) prefs.getBytes("aScene", sc.aScene, NUM_CH);
+  sc.pEn   = prefs.getUChar("pEn", 0) != 0;
+  sc.pMin  = prefs.getUShort("pMin", sc.pMin);
+  sc.pDays = prefs.getUChar("pDays", sc.pDays);
+  sc.pFade = prefs.getUChar("pFade", sc.pFade);
+  sc.nEn   = prefs.getUChar("nEn", 0) != 0;
+  sc.nFrom = prefs.getUShort("nFrom", sc.nFrom);
+  sc.nTo   = prefs.getUShort("nTo", sc.nTo);
+  sc.nPct  = prefs.getUChar("nPct", sc.nPct);
+  prefs.end();
+  if (sc.aMin >= 1440) sc.aMin = 7 * 60;
+  if (sc.pMin >= 1440) sc.pMin = 23 * 60 + 30;
+  if (sc.nFrom >= 1440) sc.nFrom = 22 * 60;
+  if (sc.nTo >= 1440) sc.nTo = 6 * 60;
+  sc.aDays &= 0x7F;
+  sc.pDays &= 0x7F;
+  if (sc.aRamp > 120) sc.aRamp = 120;
+  if (sc.pFade > 120) sc.pFade = 120;
+  if (sc.nPct > 100) sc.nPct = 100;
+}
+
+static void schedSave() {
+  if (!prefs.begin("lampada", false)) return;
+  prefs.putUChar("aEn", sc.aEn);
+  prefs.putUShort("aMin", sc.aMin);
+  prefs.putUChar("aDays", sc.aDays);
+  prefs.putUChar("aRamp", sc.aRamp);
+  prefs.putBytes("aScene", sc.aScene, NUM_CH);
+  prefs.putUChar("pEn", sc.pEn);
+  prefs.putUShort("pMin", sc.pMin);
+  prefs.putUChar("pDays", sc.pDays);
+  prefs.putUChar("pFade", sc.pFade);
+  prefs.putUChar("nEn", sc.nEn);
+  prefs.putUShort("nFrom", sc.nFrom);
+  prefs.putUShort("nTo", sc.nTo);
+  prefs.putUChar("nPct", sc.nPct);
+  prefs.end();
+}
+
+static bool localNow(struct tm& t) {
+  time_t now = time(nullptr);
+  if (now < 1700000000) return false;  // o NTP ainda nao sincronizou
+  localtime_r(&now, &t);
+  return true;
+}
+
+// Fator de brilho da noite (1 = normal). Na janela [nFrom, nTo) (pode cruzar a
+// meia-noite) o brilho percebido vai ate nPct%, com rampa suave nas bordas.
+static float nightFactorAt(const struct tm& t) {
+  if (!sc.nEn || sc.nFrom == sc.nTo) return 1.0f;
+  float m = t.tm_hour * 60.0f + t.tm_min + t.tm_sec / 60.0f;
+  float from = sc.nFrom, to = sc.nTo, since, until;
+  if (from < to) {
+    if (m < from || m >= to) return 1.0f;
+    since = m - from;
+    until = to - m;
+  } else if (m >= from) {
+    since = m - from;
+    until = to + 1440.0f - m;
+  } else if (m < to) {
+    since = m + 1440.0f - from;
+    until = to - m;
+  } else {
+    return 1.0f;
+  }
+  float s = fminf(1.0f, fminf(since, until) / (float)NIGHT_RAMP_MIN);
+  return 1.0f - (1.0f - sc.nPct / 100.0f) * s;
+}
+
+static uint32_t lastA = 0, lastP = 0;
+static void schedStep(const struct tm& t) {
+  uint16_t m   = t.tm_hour * 60 + t.tm_min;
+  uint32_t key = (uint32_t)t.tm_yday * 1440u + m + 1u;
+  uint8_t  bit = (uint8_t)(1u << t.tm_wday);
+  if (sc.aEn && m == sc.aMin && (sc.aDays & bit) && key != lastA) {
+    lastA = key;
+    autoWake(sc.aScene, sc.aRamp);
+  }
+  if (sc.pEn && m == sc.pMin && (sc.pDays & bit) && key != lastP) {
+    lastP = key;
+    autoSleep(sc.pFade);
+  }
+}
+
+static uint32_t schedT = 0;
+static void schedTick() {
+  if (millis() - schedT < 1000) return;
+  schedT = millis();
+  struct tm t;
+  float nf = 1.0f;
+  if (localNow(t)) {
+    schedStep(t);
+    nf = nightFactorAt(t);
+  }
+  if (fabsf(nf - nightFactor) > 0.004f) {
+    nightFactor = nf;
+    applyAll();
+  }
 }
 
 // -------------------------------------------------------- Modo TESTE ----
@@ -255,13 +465,16 @@ static void demoTick() {
 
 static void modeTick() {
   ovTick();
+  autoTick();
+  schedTick();
   if (curMode == MODE_DEMO) demoTick();
   else if (curMode == MODE_TEST) testTick();
 }
 
 // ------------------------------------------------------------- Modos ----
 static void setMode(Mode m) {
-  ovClear();  // acao manual cancela o aviso
+  ovClear();     // acao manual cancela o aviso do Claude
+  autoCancel();  // e o acordar/dormir em andamento
   if (m == curMode) return;
   curMode = m;
   switch (m) {
@@ -292,10 +505,10 @@ static void setLimit(int pct) {
 }
 
 static void allOff() {
-  ovActive = false;  // applyAll() abaixo ja atualiza as saidas
-  curMode = MODE_MANUAL;
-  for (uint8_t i = 0; i < NUM_CH; i++) manualVal[i] = ch[i].value = 0;
-  applyAll();
+  ovActive   = false;  // applyAll() ja atualiza as saidas
+  autoKind   = AUTO_NONE;
+  autoFactor = 1.0f;
+  zeroColors();
 }
 
 static int indexOfName(const String& n) {
@@ -313,7 +526,7 @@ static void printStatus() {
 
 // ------------------------------------------------------------- Serial ----
 static const char* HELP =
-    "Comandos: <r|g|b|ww|cw|all> 0-255 | limit 0-100 | off | manual | test | demo | status | claude ok|ask|busy|err|off [seg]";
+    "Comandos: <r|g|b|ww|cw|all> 0-255 | limit 0-100 | off | manual | test | demo | status | claude ok|ask|busy|err|off [seg] | sleep min | hora";
 
 static void handleLine(String line) {
   line.trim();
@@ -328,6 +541,12 @@ static void handleLine(String line) {
     return;
   }
   if (line == "status") { printStatus(); return; }
+  if (line == "hora") {
+    struct tm t;
+    if (localNow(t)) Serial.printf("Hora: %02d:%02d (dia da semana %d)\n", t.tm_hour, t.tm_min, t.tm_wday);
+    else Serial.println("Sem hora (o NTP nao sincronizou: precisa de Wi-Fi com internet).");
+    return;
+  }
 
   int sp = line.indexOf(' ');
   if (sp < 0) {
@@ -347,6 +566,10 @@ static void handleLine(String line) {
     String st   = sp2 < 0 ? rest : rest.substring(0, sp2);
     int    secs = sp2 < 0 ? -1 : (int)rest.substring(sp2 + 1).toInt();
     Serial.println(claudeSet(st, secs) ? "ok" : "estado desconhecido (ok|ask|busy|err|off)");
+  } else if (name == "sleep") {
+    int m = constrain(v, 0, 180);
+    if (m == 0) autoCancel();
+    else autoSleep((uint8_t)m);
   } else if (name == "all") {
     for (uint8_t i = 0; i < NUM_CH; i++) setValue(i, v);
     Serial.println("ok");
@@ -375,37 +598,67 @@ header{display:flex;justify-content:space-between;align-items:center;margin-bott
 .card{background:#fff;border:1px solid #e3e8ef;border-radius:20px;padding:16px;box-shadow:0 5px 18px #2538580b;margin-bottom:14px}
 .section-title{font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#667386;margin:0 0 10px}
 .presets{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-.preset{aspect-ratio:1.15/1;border:2px solid #0002;border-radius:16px;font:inherit;font-size:.84rem;font-weight:700;padding:6px;cursor:pointer;box-shadow:0 2px 6px #0002;display:grid;place-items:center;text-align:center}.preset:active{transform:scale(.96)}.preset.selected{outline:3px solid #3478f6;outline-offset:3px}
+.preset{position:relative;aspect-ratio:1.15/1;border:1px solid #dfe5ec;background:#fff;border-radius:14px;padding:6px;font:inherit;font-size:.84rem;font-weight:500;color:#354052;cursor:pointer;display:grid;place-items:center;text-align:center}.preset:active{transform:scale(.97)}
+.dot{position:absolute;top:8px;right:8px;width:14px;height:14px;border-radius:50%;box-shadow:inset 0 0 0 1px #0002}
+.preset.selected{border-color:#3478f6;box-shadow:inset 0 0 0 1px #3478f6;background:#eef4ff}
 .manual-head{display:flex;justify-content:space-between;align-items:center;cursor:pointer}.manual-head button{border:0;background:none;color:#3478f6;font-weight:600;font-size:.9rem}.manual-body{margin-top:14px}.manual-body[hidden]{display:none}
-label{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:center;margin:14px 0;font-size:.9rem}label b{text-align:right;font-size:.78rem;color:#697586}input[type=range]{width:100%;accent-color:#3478f6}input[type=color]{width:100%;height:42px;border:0;border-radius:10px;padding:0;background:none;cursor:pointer}
+label.sl{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:center;margin:14px 0;font-size:.9rem}label.sl b{text-align:right;font-size:.78rem;color:#697586}input[type=range]{width:100%;accent-color:#3478f6}input[type=color]{width:100%;height:42px;border:0;border-radius:10px;padding:0;background:none;cursor:pointer}
 .actions{display:flex;gap:8px}.actions button{flex:1;border:2px solid #d9e0e8;border-radius:11px;padding:11px 8px;background:#fff;color:#293444;font:inherit;font-weight:600;cursor:pointer}.actions .danger{background:#fff1f1;color:#c43131;border-color:#ffd3d3}.flag{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:#eef1f5;color:#3b4757;border:2px solid #dfe5ec;white-space:nowrap}
 .flag::before{content:"";width:9px;height:9px;border-radius:50%;background:#98a2b3}
 .flag.claude{border-color:var(--c);background:#fff;color:#18202a}.flag.claude::before{background:var(--c)}.flag.off::before{background:#d33}
 .cbar{margin:-6px 0 14px}.cbar[hidden]{display:none}.cinfo{display:flex;justify-content:space-between;font-size:.78rem;font-weight:600;color:#647080;margin-bottom:5px}
 .ctrack{height:8px;border-radius:4px;background:#e3e8ef;overflow:hidden}.cfill{height:100%;width:100%;background:var(--c,#888);border-radius:4px;transition:width .2s linear}.cfill.open{animation:pulse 1.4s ease-in-out infinite}@keyframes pulse{50%{opacity:.35}}
-@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.actions button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{outline-color:#6aa3ff}.flag{background:#1b232d;border-color:#303b49;color:#e4eaf1}.flag.claude{background:#1b232d;color:#edf2f7}.ctrack{background:#303b49}.cinfo{color:#9aa7b8}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
+@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.preset,.actions button{background:#1b232d;border-color:#303b49}.preset{color:#e4eaf1}.preset.selected{background:#1b355e;border-color:#6aa3ff;box-shadow:inset 0 0 0 1px #6aa3ff}.dot{box-shadow:inset 0 0 0 1px #fff4}.flag{background:#1b232d;border-color:#303b49;color:#e4eaf1}.flag.claude{background:#1b232d;color:#edf2f7}.ctrack{background:#303b49}.cinfo{color:#9aa7b8}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
+
+.arow{display:flex;gap:8px;align-items:center;margin:4px 0 2px}.arow>span{flex:1;font-weight:600;font-size:.9rem}
+select,input[type=time]{font:inherit;font-size:.9rem;padding:7px 8px;border:1px solid #d9e0e8;border-radius:10px;background:#fff;color:inherit;min-width:0}
+.abtn{border:1px solid #d9e0e8;background:#fff;border-radius:10px;padding:8px 12px;font:inherit;font-size:.85rem;font-weight:600;color:#293444;cursor:pointer}
+.ab{border-top:1px solid #e3e8ef;padding-top:12px;margin-top:14px}.ah{display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:.95rem}
+input.sw{appearance:none;-webkit-appearance:none;width:44px;height:26px;border-radius:13px;background:#cfd6df;position:relative;cursor:pointer;transition:background .2s;margin:0;flex:none}
+input.sw::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px #0003}
+input.sw:checked{background:#3478f6}input.sw:checked::after{left:21px}
+.fr{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px;font-size:.85rem;color:#647080}.fr .sp{flex:1}
+.days{display:flex;gap:5px;margin-top:10px}.days button{flex:1;height:34px;border:1px solid #d9e0e8;background:#fff;border-radius:10px;font:inherit;font-size:.8rem;font-weight:700;color:#647080;cursor:pointer;padding:0}
+.days button.on{background:#3478f6;border-color:#3478f6;color:#fff}
+.nrow{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:.85rem;color:#647080}.nrow input[type=range]{flex:1}.nrow b{min-width:38px;text-align:right;color:#697586;font-size:.78rem}
+#clock{margin-top:.25rem}
+@media(prefers-color-scheme:dark){select,input[type=time],.abtn,.days button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.days button.on{background:#3478f6;border-color:#3478f6;color:#fff}.ab{border-color:#303b49}input.sw{background:#3b4757}input.sw:checked{background:#3478f6}.fr,.nrow{color:#9aa6b6}}
 </style></head><body>
 <header><div><h1>Minha lâmpada</h1><p>Escolha uma cena ou ajuste manualmente</p></div><span id="flag" class="flag">Manual</span></header>
 <div class="cbar" id="claudebar" hidden><div class="cinfo"><span id="cname"></span><span id="ctime"></span></div><div class="ctrack"><div class="cfill" id="cfill"></div></div></div>
+<div class="cbar" id="autobar" hidden><div class="cinfo"><span id="aname"></span><span><span id="atime"></span> <button class="abtn" id="acancel" onclick="autoCancel()" style="padding:3px 9px;margin-left:6px"></button></span></div><div class="ctrack"><div class="cfill" id="afill"></div></div></div>
 <section class="card"><h2 class="section-title">Cores prontas</h2><div class="presets" id="presets"></div></section>
 <section class="card"><div class="manual-head" onclick="toggleManual()"><div><h2 class="section-title" style="margin:0">Ajuste manual</h2><p>RGB e temperatura do branco</p></div><button id="toggle">Mostrar</button></div><div class="manual-body" id="manual" hidden><input type="color" id="picker" aria-label="Escolher cor"><div id="sliders"></div></div></section>
-<section class="card"><h2 class="section-title">Brilho máximo</h2><label><span>Limite</span><input type="range" id="i_limit" min="0" max="100" oninput="changeLimit()"><b id="v_limit">0%</b></label></section>
+<section class="card"><div class="manual-head" onclick="toggleAuto()"><div><h2 class="section-title" style="margin:0">Automação</h2><p id="clock">Carregando…</p></div><button id="atoggle">Mostrar</button></div><div class="manual-body" id="auto" hidden>
+<div class="arow"><span>Modo dormir</span><select id="sl_min"><option value="10">10 min</option><option value="20" selected>20 min</option><option value="30">30 min</option><option value="60">60 min</option></select><button class="abtn" onclick="sleepNow()">Iniciar</button></div>
+<div class="ab"><div class="ah"><span>Acender</span><input type="checkbox" class="sw" id="a_en" onchange="sched()"></div>
+<div class="fr"><span>às</span><input type="time" id="a_t" onchange="sched()"><span>cena</span><select id="a_scene" onchange="sched()"></select></div>
+<div class="fr"><span>subir em</span><select id="a_ramp" onchange="sched()"><option value="0">na hora</option><option value="5">5 min</option><option value="10">10 min</option><option value="20">20 min</option><option value="30">30 min</option></select></div>
+<div class="days" id="a_days"></div></div>
+<div class="ab"><div class="ah"><span>Apagar</span><input type="checkbox" class="sw" id="p_en" onchange="sched()"></div>
+<div class="fr"><span>às</span><input type="time" id="p_t" onchange="sched()"><span>apagar em</span><select id="p_fade" onchange="sched()"><option value="0">na hora</option><option value="10">10 min</option><option value="20">20 min</option><option value="30">30 min</option></select></div>
+<div class="days" id="p_days"></div></div>
+<div class="ab"><div class="ah"><span>Brilho da noite</span><input type="checkbox" class="sw" id="n_en" onchange="sched()"></div>
+<div class="fr"><span>das</span><input type="time" id="n_from" onchange="sched()"><span>às</span><input type="time" id="n_to" onchange="sched()"></div>
+<div class="nrow"><span>Brilho</span><input type="range" id="n_pct" min="5" max="100" oninput="$('v_npct').textContent=this.value+'%';sched()"><b id="v_npct">30%</b></div></div>
+</div></section>
+<section class="card"><h2 class="section-title">Brilho máximo</h2><label class="sl"><span>Limite</span><input type="range" id="i_limit" min="0" max="100" oninput="changeLimit()"><b id="v_limit">0%</b></label></section>
 <div class="actions"><button class="danger" onclick="off()">Apagar</button></div>
 <script>
 const N=['r','g','b','ww','cw'];
 const labels={r:'Vermelho',g:'Verde',b:'Azul',ww:'Branco quente',cw:'Branco frio'};
 const presets=[
-['Quente',[255,70,0,0,0]],['Relaxar',[255,150,0,30,0]],['Luz baixa',[100,40,0,25,0]],['Leitura',[0,0,0,210,70]],
-['Neutro',[0,0,0,110,145]],['Céu',[0,90,255,0,0]],['Água',[0,255,255,0,0]],['Oceano',[0,100,255,0,0]],
-['Natureza',[20,255,80,0,0]],['Limão',[150,255,0,0,0]],['Noite',[80,0,255,0,0]],['Festa',[255,0,120,0,0]]];
+['Festa',[255,0,120,0,0]],['Quente',[255,70,0,0,0]],['Limão',[150,255,0,0,0]],['Natureza',[20,255,80,0,0]],
+['Água',[0,255,255,0,0]],['Céu',[0,90,255,0,0]],['Oceano',[0,100,255,0,0]],['Noite',[80,0,255,0,0]],
+['Luz baixa',[100,40,0,25,0]],['Relaxar',[255,150,0,30,0]],['Leitura',[0,0,0,210,70]],['Neutro',[0,0,0,110,145]]];
 const ovInfo={ok:['concluído','#22a355',[0,255,0]],ask:['precisa de você','#e6a100',[255,160,0]],busy:['trabalhando','#2f7bf6',[0,60,255]],err:['erro','#d33636',[255,0,0]]};
 const $=id=>document.getElementById(id);
 const el=k=>$('i_'+k);
 let tCh,tLim,hold=0,ov=null;
 const warm=[255,214,170],cool=[201,226,255];
 function rgbOf(v){return [0,1,2].map(i=>Math.min(255,Math.round(v[i]+warm[i]*v[3]/255+cool[i]*v[4]/255)))}
-$('presets').innerHTML=presets.map((p,i)=>{const c=rgbOf(p[1]);const dark=0.299*c[0]+0.587*c[1]+0.114*c[2]>150;return `<button class="preset" style="background:rgb(${c});color:${dark?'#18202a':'#fff'}" onclick="applyPreset(${i})">${p[0]}</button>`}).join('');
-$('sliders').innerHTML=N.map(k=>`<label><span>${labels[k]}</span><input type="range" id="i_${k}" min="0" max="255" oninput="changeColor()"><b id="v_${k}">0</b></label>`).join('');
+$('presets').innerHTML=presets.map((p,i)=>`<button class="preset" onclick="applyPreset(${i})"><span class="dot" style="background:rgb(${rgbOf(p[1])})"></span>${p[0]}</button>`).join('');
+$('sliders').innerHTML=N.map(k=>`<label class="sl"><span>${labels[k]}</span><input type="range" id="i_${k}" min="0" max="255" oninput="changeColor()"><b id="v_${k}">0</b></label>`).join('');
 let key='';try{key=localStorage.getItem('lk')||''}catch(e){}
 function api(q,retry){
   const u=q+(q.includes('?')?'&':'?')+'_='+Date.now()+(key?'&key='+encodeURIComponent(key):'');
@@ -422,7 +675,7 @@ function api(q,retry){
   });
 }
 function lab(k){$('v_'+k).textContent=k==='limit'?el(k).value+'%':el(k).value}
-function offline(){const f=$('flag');f.className='flag off';f.textContent='Sem conexão';f.style.removeProperty('--c');$('claudebar').hidden=true;ov=null}
+function offline(){const f=$('flag');f.className='flag off';f.textContent='Sem conexão';f.style.removeProperty('--c');$('claudebar').hidden=true;$('autobar').hidden=true;ov=null;autoI=null}
 function touch(){hold=Date.now()+1500}
 function markPreset(s){
   document.querySelectorAll('.preset').forEach((b,i)=>b.classList.toggle('selected',presets[i][1].every((v,j)=>v===s[N[j]])));
@@ -456,6 +709,7 @@ function tickBar(){
 function show(s,force){
   if(force||Date.now()>=hold)paintColors(s);
   paintFlag(s);
+  paintAuto(s);
 }
 function send(){clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+N.map(k=>k+'='+el(k).value).join('&')).then(s=>show(s)).catch(offline),70)}
 function changeColor(){N.forEach(lab);touch();markPreset(localState());send()}
@@ -464,6 +718,63 @@ function applyPreset(i){const v=presets[i][1];N.forEach((k,j)=>el(k).value=v[j])
 function off(){hold=Date.now()+2000;api('/off').then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()})}
 function toggleManual(){const x=$('manual');x.hidden=!x.hidden;$('toggle').textContent=x.hidden?'Mostrar':'Ocultar'}
 $('picker').oninput=e=>{N.slice(0,3).forEach((k,i)=>el(k).value=parseInt(e.target.value.substr(1+i*2,2),16));changeColor()};
+
+// ---------- Automação ----------
+const DAYS=['D','S','T','Q','Q','S','S'];
+['a','p'].forEach(p=>{$(p+'_days').innerHTML=DAYS.map((d,i)=>`<button type="button" data-b="${i}" onclick="this.classList.toggle('on');sched()">${d}</button>`).join('')});
+$('a_scene').innerHTML=presets.map((p,i)=>`<option value="${i}">${p[0]}</option>`).join('')+'<option value="-1" disabled>Personalizada</option>';
+let tSch,schedHold=0,sch=null,autoI=null,nightPct=100;
+function getDays(p){let m=0;$(p+'_days').querySelectorAll('button').forEach(b=>{if(b.classList.contains('on'))m|=1<<(+b.dataset.b)});return m}
+function setDays(p,m){$(p+'_days').querySelectorAll('button').forEach(b=>b.classList.toggle('on',!!(m&(1<<(+b.dataset.b)))))}
+function setSel(id,v){const s=$(id);v=String(v);if(![...s.options].some(o=>o.value===v)){const o=document.createElement('option');o.value=v;o.textContent=v+' min';s.appendChild(o)}s.value=v}
+function sched(){
+  schedHold=Date.now()+4000;clearTimeout(tSch);
+  tSch=setTimeout(()=>{
+    const q=new URLSearchParams({
+      a_en:$('a_en').checked?1:0,a_t:$('a_t').value||'07:00',a_d:getDays('a'),a_ramp:$('a_ramp').value,
+      p_en:$('p_en').checked?1:0,p_t:$('p_t').value||'23:30',p_d:getDays('p'),p_fade:$('p_fade').value,
+      n_en:$('n_en').checked?1:0,n_from:$('n_from').value||'22:00',n_to:$('n_to').value||'06:00',n_pct:$('n_pct').value});
+    const si=+$('a_scene').value;if(si>=0)q.set('a_s',presets[si][1].join(','));
+    api('/sched/set?'+q.toString()).then(s=>showSched(s,true)).catch(()=>{});
+  },400);
+}
+function paintClock(){
+  if(!sch)return;
+  let t=sch.synced?'Hora no ESP: '+sch.time:'Sem hora (precisa de internet) · agenda inativa';
+  if(sch.synced&&nightPct<100)t+=' · noite '+nightPct+'%';
+  $('clock').textContent=t;
+}
+function showSched(s,force){
+  sch=s;paintClock();
+  if(!force&&Date.now()<schedHold)return;
+  $('a_en').checked=!!s.a.en;$('a_t').value=s.a.t;setDays('a',s.a.d);setSel('a_ramp',s.a.ramp);
+  const pi=presets.findIndex(p=>p[1].every((v,j)=>v===s.a.s[j]));$('a_scene').value=pi>=0?pi:-1;
+  $('p_en').checked=!!s.p.en;$('p_t').value=s.p.t;setDays('p',s.p.d);setSel('p_fade',s.p.fade);
+  $('n_en').checked=!!s.n.en;$('n_from').value=s.n.from;$('n_to').value=s.n.to;$('n_pct').value=s.n.pct;$('v_npct').textContent=s.n.pct+'%';
+}
+function loadSched(){api('/sched').then(s=>showSched(s)).catch(()=>{})}
+function toggleAuto(){const x=$('auto');x.hidden=!x.hidden;$('atoggle').textContent=x.hidden?'Mostrar':'Ocultar'}
+function sleepNow(){api('/sleep?min='+$('sl_min').value).then(s=>show(s,true)).catch(()=>{})}
+function autoCancel(){api('/auto/cancel').then(s=>show(s,true)).catch(()=>{})}
+function paintAuto(s){
+  nightPct=s.night===undefined?100:s.night;paintClock();
+  const bar=$('autobar');
+  if(!s.auto){autoI=null;bar.hidden=true;return}
+  const wake=s.auto==='wake',c=wake?'#f5a623':'#6b5bd6';
+  bar.hidden=false;bar.style.setProperty('--c',c);
+  $('aname').textContent=wake?'Acendendo aos poucos':'Modo dormir';$('acancel').textContent=wake?'Pular':'Cancelar';
+  const end=Date.now()+s.autoMs;
+  if(!autoI||autoI.wake!==wake||autoI.total!==s.autoTotal||Math.abs(autoI.end-end)>2500)autoI={wake:wake,end:end,total:s.autoTotal};
+  tickAuto();
+}
+function tickAuto(){
+  if(!autoI)return;
+  const left=Math.max(0,autoI.end-Date.now()),f=autoI.total?left/autoI.total:0;
+  $('afill').style.width=((autoI.wake?1-f:f)*100)+'%';
+  const m=Math.floor(left/60000),sec=Math.floor(left/1000)%60;
+  $('atime').textContent=m+':'+String(sec).padStart(2,'0');
+}
+loadSched();setInterval(loadSched,30000);setInterval(tickAuto,500);
 api('/state').then(s=>show(s,true)).catch(offline);
 setInterval(()=>api('/state').then(s=>show(s)).catch(offline),1000);
 setInterval(tickBar,200);
@@ -489,6 +800,16 @@ static void sendState() {
   j += (unsigned int)(left > 0 ? left : 0);
   j += ",\"ovTotal\":";
   j += (unsigned int)(ovActive ? ovTotal : 0);
+  j += ",\"auto\":\"";
+  j += autoKind == AUTO_WAKE ? "wake" : autoKind == AUTO_SLEEP ? "sleep" : "";
+  uint32_t used  = millis() - autoStart;
+  uint32_t aleft = (autoKind != AUTO_NONE && autoDur > used) ? autoDur - used : 0;
+  j += "\",\"autoMs\":";
+  j += (unsigned int)aleft;
+  j += ",\"autoTotal\":";
+  j += (unsigned int)(autoKind != AUTO_NONE ? autoDur : 0);
+  j += ",\"night\":";
+  j += (unsigned int)(nightFactor * 100.0f + 0.5f);
   j += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", j);
@@ -522,6 +843,74 @@ static void handleSet() {
   sendState();
 }
 
+static bool parseHM(const String& str, uint16_t& out) {
+  int h, m;
+  if (str.length() != 5 || sscanf(str.c_str(), "%d:%d", &h, &m) != 2) return false;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+  out = (uint16_t)(h * 60 + m);
+  return true;
+}
+
+static void sendSched() {
+  struct tm t;
+  bool      ok = localNow(t);
+  char      hm[6] = "";
+  if (ok) snprintf(hm, sizeof hm, "%02d:%02d", t.tm_hour, t.tm_min);
+  char b[480];
+  snprintf(b, sizeof b,
+           "{\"time\":\"%s\",\"synced\":%s,"
+           "\"a\":{\"en\":%u,\"t\":\"%02u:%02u\",\"d\":%u,\"ramp\":%u,\"s\":[%u,%u,%u,%u,%u]},"
+           "\"p\":{\"en\":%u,\"t\":\"%02u:%02u\",\"d\":%u,\"fade\":%u},"
+           "\"n\":{\"en\":%u,\"from\":\"%02u:%02u\",\"to\":\"%02u:%02u\",\"pct\":%u}}",
+           hm, ok ? "true" : "false",
+           (unsigned)sc.aEn, sc.aMin / 60u, sc.aMin % 60u, (unsigned)sc.aDays, (unsigned)sc.aRamp,
+           (unsigned)sc.aScene[0], (unsigned)sc.aScene[1], (unsigned)sc.aScene[2],
+           (unsigned)sc.aScene[3], (unsigned)sc.aScene[4],
+           (unsigned)sc.pEn, sc.pMin / 60u, sc.pMin % 60u, (unsigned)sc.pDays, (unsigned)sc.pFade,
+           (unsigned)sc.nEn, sc.nFrom / 60u, sc.nFrom % 60u, sc.nTo / 60u, sc.nTo % 60u,
+           (unsigned)sc.nPct);
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", b);
+}
+
+static void handleSchedSet() {
+  if (!authOk()) return;
+  uint16_t v;
+  if (server.hasArg("a_en"))   sc.aEn = server.arg("a_en").toInt() != 0;
+  if (server.hasArg("a_t") && parseHM(server.arg("a_t"), v)) sc.aMin = v;
+  if (server.hasArg("a_d"))    sc.aDays = (uint8_t)constrain((int)server.arg("a_d").toInt(), 0, 127);
+  if (server.hasArg("a_ramp")) sc.aRamp = (uint8_t)constrain((int)server.arg("a_ramp").toInt(), 0, 120);
+  if (server.hasArg("a_s")) {
+    unsigned c[NUM_CH];
+    if (sscanf(server.arg("a_s").c_str(), "%u,%u,%u,%u,%u", &c[0], &c[1], &c[2], &c[3], &c[4]) == 5)
+      for (uint8_t i = 0; i < NUM_CH; i++) sc.aScene[i] = (uint8_t)(c[i] > 255 ? 255 : c[i]);
+  }
+  if (server.hasArg("p_en"))   sc.pEn = server.arg("p_en").toInt() != 0;
+  if (server.hasArg("p_t") && parseHM(server.arg("p_t"), v)) sc.pMin = v;
+  if (server.hasArg("p_d"))    sc.pDays = (uint8_t)constrain((int)server.arg("p_d").toInt(), 0, 127);
+  if (server.hasArg("p_fade")) sc.pFade = (uint8_t)constrain((int)server.arg("p_fade").toInt(), 0, 120);
+  if (server.hasArg("n_en"))   sc.nEn = server.arg("n_en").toInt() != 0;
+  if (server.hasArg("n_from") && parseHM(server.arg("n_from"), v)) sc.nFrom = v;
+  if (server.hasArg("n_to") && parseHM(server.arg("n_to"), v))     sc.nTo = v;
+  if (server.hasArg("n_pct"))  sc.nPct = (uint8_t)constrain((int)server.arg("n_pct").toInt(), 0, 100);
+  schedSave();
+  sendSched();
+}
+
+static void handleSleep() {
+  if (!authOk()) return;
+  int m = constrain((int)server.arg("min").toInt(), 0, 180);
+  if (m == 0) autoCancel();
+  else autoSleep((uint8_t)m);
+  sendState();
+}
+
+static void handleAutoCancel() {
+  if (!authOk()) return;
+  autoCancel();
+  sendState();
+}
+
 static void handleClaude() {
   if (!authOk()) return;
   int secs = server.hasArg("secs") ? constrain((int)server.arg("secs").toInt(), 0, 86400) : -1;
@@ -549,6 +938,7 @@ static void startWifi() {
 #endif
   if (ok) {
     Serial.printf("Wi-Fi ok. IP: %s\n", WiFi.localIP().toString().c_str());
+    configTzTime(TZ_POSIX, "pool.ntp.org", "time.google.com");  // hora para a agenda
   } else {
 #ifdef WIFI_SSID
     Serial.printf("Nao conectou em '%s' (status %d). Rede de 2,4 GHz? Senha correta?\n",
@@ -587,6 +977,7 @@ void setup() {
   Serial.begin(115200);
   for (uint8_t i = 0; i < NUM_CH; i++) pwmAttach(i, ch[i].pin);
   allOff();
+  schedLoad();
 
 #if DEMO_ON_BOOT
   setMode(MODE_DEMO);
@@ -598,6 +989,10 @@ void setup() {
   server.on("/set", handleSet);
   server.on("/state", sendState);
   server.on("/claude", handleClaude);
+  server.on("/sched", sendSched);
+  server.on("/sched/set", handleSchedSet);
+  server.on("/sleep", handleSleep);
+  server.on("/auto/cancel", handleAutoCancel);
   server.on("/off", handleOff);
   server.begin();
 

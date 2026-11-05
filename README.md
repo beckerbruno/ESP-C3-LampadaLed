@@ -59,6 +59,18 @@ A página web é só de controle manual. Os modos de diagnóstico (`test` e `dem
 - **HTTP:** `/set?r=255&g=0&b=80&ww=0&cw=0&limit=30`, `/off`, `/state`, `/claude?state=...`.
 - **Serial (115200):** `r 128`, `g 0`, `b 255`, `ww 100`, `cw 100`, `all 0`, `limit 40`, `off`, `manual`, `test`, `demo`, `status`.
 
+## Automação por horário
+
+O ESP pega a hora na internet (NTP, fuso de Brasília) quando está no seu Wi-Fi. **Sem Wi-Fi/internet não há hora e a agenda fica parada** (no modo AP `LampadaLed` ela não roda). A agenda fica salva na memória do ESP e sobrevive a reinicializações. Tudo se configura no card "Automação" da página.
+
+- **Acender (acordar aos poucos):** num horário e dias da semana, a luz sobe de 0 até a cena escolhida em 0–120 min.
+- **Apagar:** num horário, apaga na hora ou diminui por 10/20/30 min.
+- **Modo dormir:** botão que diminui o brilho aos poucos (10/20/30/60 min) e apaga. Sem nada aceso, não faz nada.
+- **Brilho da noite:** entre dois horários o brilho cai para a % escolhida, com transição suave de 30 min nas bordas (vale também para os avisos do Claude).
+- Qualquer ajuste manual cancela um acordar/dormir em andamento. A barra no topo mostra o progresso, com botão Cancelar/Pular.
+
+Endpoints (exigem `key` se `API_KEY` estiver definida): `/sched`, `/sched/set?a_en=1&a_t=07:00&a_d=127&a_ramp=20&a_s=r,g,b,ww,cw&p_en&p_t&p_d&p_fade&n_en&n_from&n_to&n_pct`, `/sleep?min=20` (0 cancela), `/auto/cancel`. Serial: `sleep 20`, `hora`. Para outro fuso, mude `TZ_POSIX` em `main.cpp`.
+
 ## Fase 2 (bateria)
 
 O ESP passa a ser alimentado pelo + da bateria, passando por um diodo Schottky (1N5819 ou SS14) até o pino 5V. O diodo impede que o USB do ESP empurre corrente para dentro da célula. O ESP não carrega a bateria: a carga continua com o IC da placa antiga.
