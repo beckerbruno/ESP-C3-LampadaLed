@@ -40,6 +40,33 @@ static uint8_t limitPct = DEFAULT_LIMIT_PCT;
 enum Mode : uint8_t { MODE_MANUAL, MODE_TEST, MODE_DEMO };
 static Mode curMode = MODE_MANUAL;
 
+// ------------------------------------------------- Aviso do Claude (hooks) ----
+// O Claude Code manda "ok" (verde), "ask" (amarelo), "busy" (azul) ou "err" (vermelho)
+// para /claude. O aviso cobre a cor atual por alguns segundos e depois some: o que
+// estava antes (cor manual, demo, teste ou apagado) volta sozinho, porque nada disso
+// foi alterado. Qualquer acao manual (slider, modo, apagar) cancela o aviso.
+// Para mudar tempos ou a chave, defina estas macros no config.h.
+#ifndef CLAUDE_OK_SECS
+#define CLAUDE_OK_SECS    20     // verde: terminou
+#endif
+#ifndef CLAUDE_ASK_SECS
+#define CLAUDE_ASK_SECS   120    // amarelo: precisa de voce
+#endif
+#ifndef CLAUDE_BUSY_SECS
+#define CLAUDE_BUSY_SECS  300    // azul: trabalhando (limite de seguranca)
+#endif
+#ifndef CLAUDE_ERR_SECS
+#define CLAUDE_ERR_SECS   30     // vermelho: erro
+#endif
+#ifndef CLAUDE_KEY
+#define CLAUDE_KEY ""            // se nao vazio, /claude exige ?key=...
+#endif
+
+static bool     ovActive = false;
+static uint8_t  ovVal[NUM_CH] = {0, 0, 0, 0, 0};
+static uint32_t ovUntil = 0;     // 0 = sem prazo (so some com "off")
+static char     ovName[8] = "";
+
 static const char* modeName() {
   return curMode == MODE_DEMO ? "demo" : curMode == MODE_TEST ? "test" : "manual";
 }
@@ -66,13 +93,64 @@ static void pwmWrite(uint8_t idx, uint8_t pin, uint32_t duty) {
 }
 
 static void applyChannel(uint8_t i) {
-  float x    = ch[i].value / 255.0f;
-  float duty = powf(x, GAMMA_EXP) * (limitPct / 100.0f);
+  float   x   = (ovActive ? ovVal[i] : ch[i].value) / 255.0f;
+  uint8_t lim = limitPct;
+  if (ovActive && lim == 0) lim = DEFAULT_LIMIT_PCT;  // aviso aparece mesmo com limite 0
+  float duty = powf(x, GAMMA_EXP) * (lim / 100.0f);
   pwmWrite(i, ch[i].pin, (uint32_t)(duty * PWM_MAX + 0.5f));
 }
 
 static void applyAll() {
   for (uint8_t i = 0; i < NUM_CH; i++) applyChannel(i);
+}
+
+static void ovClear() {
+  if (!ovActive) return;
+  ovActive = false;
+  ovName[0] = 0;
+  applyAll();  // volta ao que estava por baixo
+}
+
+static void ovTick() {
+  if (ovActive && ovUntil && (int32_t)(millis() - ovUntil) >= 0) {
+    Serial.println("Aviso do Claude terminou.");
+    ovClear();
+  }
+}
+
+struct ClaudeState {
+  const char* name;
+  uint8_t     v[NUM_CH];  // r, g, b, ww, cw
+  uint16_t    secs;
+};
+
+static const ClaudeState CLAUDE_STATES[] = {
+  {"ok",   {  0, 255,   0, 0, 0}, CLAUDE_OK_SECS},
+  {"ask",  {255, 160,   0, 0, 0}, CLAUDE_ASK_SECS},
+  {"busy", {  0,  60, 255, 0, 0}, CLAUDE_BUSY_SECS},
+  {"err",  {255,   0,   0, 0, 0}, CLAUDE_ERR_SECS},
+};
+
+// secs < 0 = tempo padrao do estado; secs == 0 = sem prazo.
+static bool claudeSet(const String& st, int secs) {
+  if (st == "off" || st == "clear") {
+    ovClear();
+    return true;
+  }
+  for (const ClaudeState& c : CLAUDE_STATES) {
+    if (!st.equals(c.name)) continue;
+    for (uint8_t i = 0; i < NUM_CH; i++) ovVal[i] = c.v[i];
+    int t   = secs >= 0 ? secs : c.secs;
+    ovUntil = t ? millis() + (uint32_t)t * 1000UL : 0;
+    if (t && ovUntil == 0) ovUntil = 1;
+    strncpy(ovName, c.name, sizeof(ovName) - 1);
+    ovName[sizeof(ovName) - 1] = 0;
+    ovActive = true;
+    applyAll();
+    Serial.printf("Claude: %s por %d s\n", c.name, t);
+    return true;
+  }
+  return false;
 }
 
 // -------------------------------------------------------- Modo TESTE ----
@@ -160,12 +238,14 @@ static void demoTick() {
 }
 
 static void modeTick() {
+  ovTick();
   if (curMode == MODE_DEMO) demoTick();
   else if (curMode == MODE_TEST) testTick();
 }
 
 // ------------------------------------------------------------- Modos ----
 static void setMode(Mode m) {
+  ovClear();  // acao manual cancela o aviso
   if (m == curMode) return;
   curMode = m;
   switch (m) {
@@ -196,6 +276,7 @@ static void setLimit(int pct) {
 }
 
 static void allOff() {
+  ovActive = false;  // applyAll() abaixo ja atualiza as saidas
   curMode = MODE_MANUAL;
   for (uint8_t i = 0; i < NUM_CH; i++) manualVal[i] = ch[i].value = 0;
   applyAll();
@@ -216,7 +297,7 @@ static void printStatus() {
 
 // ------------------------------------------------------------- Serial ----
 static const char* HELP =
-    "Comandos: <r|g|b|ww|cw|all> 0-255 | limit 0-100 | off | manual | test | demo | status";
+    "Comandos: <r|g|b|ww|cw|all> 0-255 | limit 0-100 | off | manual | test | demo | status | claude ok|ask|busy|err|off [seg]";
 
 static void handleLine(String line) {
   line.trim();
@@ -243,6 +324,13 @@ static void handleLine(String line) {
   if (name == "limit") {
     setLimit(v);
     Serial.printf("limite = %u%%\n", (unsigned)limitPct);
+  } else if (name == "claude") {
+    String rest = line.substring(sp + 1);
+    rest.trim();
+    int    sp2  = rest.indexOf(' ');
+    String st   = sp2 < 0 ? rest : rest.substring(0, sp2);
+    int    secs = sp2 < 0 ? -1 : (int)rest.substring(sp2 + 1).toInt();
+    Serial.println(claudeSet(st, secs) ? "ok" : "estado desconhecido (ok|ask|busy|err|off)");
   } else if (name == "all") {
     for (uint8_t i = 0; i < NUM_CH; i++) setValue(i, v);
     Serial.println("ok");
@@ -318,10 +406,15 @@ function paintColors(s){
   $('picker').value='#'+N.slice(0,3).map(k=>Number(s[k]).toString(16).padStart(2,'0')).join('');
   paintPreview(s);
 }
+const ovNames={ok:'concluído',ask:'precisa de você',busy:'trabalhando',err:'erro'};
+function paintOv(s){
+  if(s.ov)$('status').textContent+=' · Claude: '+(ovNames[s.ov]||s.ov)+(s.ovLeft?' ('+s.ovLeft+'s)':'');
+}
 function show(s,force){
   if(!force&&Date.now()<hold)return;
   paintMode(s.mode);
   paintColors(s);
+  paintOv(s);
 }
 function send(){clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+N.map(k=>k+'='+el(k).value).join('&')).then(s=>show(s)).catch(offline),70)}
 function changeColor(){N.forEach(lab);touch();paintPreview(localState());send()}
@@ -353,7 +446,12 @@ static void sendState() {
   j += limitPct;
   j += ",\"mode\":\"";
   j += modeName();
-  j += "\"}";
+  j += "\",\"ov\":\"";
+  j += ovActive ? ovName : "";
+  j += "\",\"ovLeft\":";
+  int32_t left = (ovActive && ovUntil) ? (int32_t)(ovUntil - millis()) : 0;
+  j += (unsigned int)(left > 0 ? left / 1000 + 1 : 0);
+  j += "}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", j);
 }
@@ -370,6 +468,19 @@ static void handleMode() {
   if (m == "demo")      setMode(MODE_DEMO);
   else if (m == "test") setMode(MODE_TEST);
   else                  setMode(MODE_MANUAL);
+  sendState();
+}
+
+static void handleClaude() {
+  if (strlen(CLAUDE_KEY) && !server.arg("key").equals(CLAUDE_KEY)) {
+    server.send(403, "text/plain", "chave invalida");
+    return;
+  }
+  int secs = server.hasArg("secs") ? constrain((int)server.arg("secs").toInt(), 0, 86400) : -1;
+  if (!claudeSet(server.arg("state"), secs)) {
+    server.send(400, "text/plain", "state invalido: ok|ask|busy|err|off");
+    return;
+  }
   sendState();
 }
 
@@ -429,6 +540,7 @@ void setup() {
   server.on("/set", handleSet);
   server.on("/state", sendState);
   server.on("/mode", handleMode);
+  server.on("/claude", handleClaude);
   server.on("/off", []() { allOff(); sendState(); });
   server.on("/test", []() { setMode(MODE_TEST); sendState(); });
   server.on("/demo", []() { setMode(MODE_DEMO); sendState(); });
