@@ -32,5 +32,5 @@
 
 // Rede
 #define HOSTNAME  "lampada"        // acessivel em http://lampada.local
-#define AP_SSID   "LampadaLed"     // usado se nao conectar no Wi-Fi
-#define AP_PASS   "lampada1234"
+// Ponto de acesso de emergencia (AP_SSID, AP_PASS) e chave de acesso (API_KEY):
+// defina no include/secrets.h, que nao vai para o Git.

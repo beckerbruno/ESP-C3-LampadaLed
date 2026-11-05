@@ -12,8 +12,25 @@
 #include <math.h>
 #include "config.h"
 
+#if __has_include(<esp_random.h>)
+#include <esp_random.h>
+#else
+#include <esp_system.h>
+#endif
+
 #if __has_include("secrets.h")
 #include "secrets.h"
+#endif
+
+// Segredos e acesso ficam no secrets.h (fora do Git). Valores padrao seguros:
+//  - AP_PASS: se nao definida, o ponto de acesso usa uma senha sorteada a cada boot
+//    (mostrada na serial), nunca uma senha fixa publica.
+//  - API_KEY: se definida, /set, /off e /claude exigem ?key=...
+#ifndef AP_SSID
+#define AP_SSID "LampadaLed"
+#endif
+#ifndef API_KEY
+#define API_KEY ""
 #endif
 
 // ---------------------------------------------------------------- PWM ----
@@ -57,9 +74,6 @@ static Mode curMode = MODE_MANUAL;
 #endif
 #ifndef CLAUDE_ERR_SECS
 #define CLAUDE_ERR_SECS   30     // vermelho: erro
-#endif
-#ifndef CLAUDE_KEY
-#define CLAUDE_KEY ""            // se nao vazio, /claude exige ?key=...
 #endif
 
 static bool     ovActive = false;
@@ -359,9 +373,9 @@ static const char PAGE[] PROGMEM = R"HTML(<!doctype html>
 *{box-sizing:border-box}body{margin:0 auto;max-width:520px;padding:20px 16px 36px}
 header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}h1{font-size:1.35rem;margin:0}p{color:#647080;margin:.35rem 0 0;font-size:.9rem}
 .card{background:#fff;border:1px solid #e3e8ef;border-radius:20px;padding:16px;box-shadow:0 5px 18px #2538580b;margin-bottom:14px}
-.preview{height:112px;border-radius:14px;background:#000;box-shadow:inset 0 0 0 1px #ffffff30;display:grid;place-items:center;color:#fff;text-shadow:0 1px 3px #000;font-weight:600;margin-bottom:14px}
 .section-title{font-size:.78rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#667386;margin:0 0 10px}
-.presets{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.preset{border:1px solid #dfe5ec;background:#fff;border-radius:12px;padding:8px 3px;font:inherit;font-size:.72rem;color:#354052;cursor:pointer}.preset:active{transform:scale(.97)}.swatch{height:31px;width:31px;border-radius:50%;margin:0 auto 5px;box-shadow:inset 0 0 0 1px #0001}.preset.selected{border:2px solid #3478f6;padding:7px 2px;background:#eef4ff}
+.presets{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.preset{aspect-ratio:1.15/1;border:2px solid #0002;border-radius:16px;font:inherit;font-size:.84rem;font-weight:700;padding:6px;cursor:pointer;box-shadow:0 2px 6px #0002;display:grid;place-items:center;text-align:center}.preset:active{transform:scale(.96)}.preset.selected{outline:3px solid #3478f6;outline-offset:3px}
 .manual-head{display:flex;justify-content:space-between;align-items:center;cursor:pointer}.manual-head button{border:0;background:none;color:#3478f6;font-weight:600;font-size:.9rem}.manual-body{margin-top:14px}.manual-body[hidden]{display:none}
 label{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:center;margin:14px 0;font-size:.9rem}label b{text-align:right;font-size:.78rem;color:#697586}input[type=range]{width:100%;accent-color:#3478f6}input[type=color]{width:100%;height:42px;border:0;border-radius:10px;padding:0;background:none;cursor:pointer}
 .actions{display:flex;gap:8px}.actions button{flex:1;border:2px solid #d9e0e8;border-radius:11px;padding:11px 8px;background:#fff;color:#293444;font:inherit;font-weight:600;cursor:pointer}.actions .danger{background:#fff1f1;color:#c43131;border-color:#ffd3d3}.flag{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:#eef1f5;color:#3b4757;border:2px solid #dfe5ec;white-space:nowrap}
@@ -369,41 +383,56 @@ label{display:grid;grid-template-columns:105px 1fr 34px;gap:8px;align-items:cent
 .flag.claude{border-color:var(--c);background:#fff;color:#18202a}.flag.claude::before{background:var(--c)}.flag.off::before{background:#d33}
 .cbar{margin:-6px 0 14px}.cbar[hidden]{display:none}.cinfo{display:flex;justify-content:space-between;font-size:.78rem;font-weight:600;color:#647080;margin-bottom:5px}
 .ctrack{height:8px;border-radius:4px;background:#e3e8ef;overflow:hidden}.cfill{height:100%;width:100%;background:var(--c,#888);border-radius:4px;transition:width .2s linear}.cfill.open{animation:pulse 1.4s ease-in-out infinite}@keyframes pulse{50%{opacity:.35}}
-@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.preset,.actions button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{background:#1b355e}.flag{background:#1b232d;border-color:#303b49;color:#e4eaf1}.flag.claude{background:#1b232d;color:#edf2f7}.ctrack{background:#303b49}.cinfo{color:#9aa7b8}.preview{box-shadow:inset 0 0 0 1px #fff3}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
+@media(prefers-color-scheme:dark){:root{color:#edf2f7;background:#11161d;color-scheme:dark}.card,.actions button{background:#1b232d;border-color:#303b49;color:#e4eaf1}.preset.selected{outline-color:#6aa3ff}.flag{background:#1b232d;border-color:#303b49;color:#e4eaf1}.flag.claude{background:#1b232d;color:#edf2f7}.ctrack{background:#303b49}.cinfo{color:#9aa7b8}.actions .danger{background:#3b2023;color:#ff9b9b;border-color:#623337}}
 </style></head><body>
 <header><div><h1>Minha lâmpada</h1><p>Escolha uma cena ou ajuste manualmente</p></div><span id="flag" class="flag">Manual</span></header>
 <div class="cbar" id="claudebar" hidden><div class="cinfo"><span id="cname"></span><span id="ctime"></span></div><div class="ctrack"><div class="cfill" id="cfill"></div></div></div>
-<section class="card"><div class="preview" id="preview">Desligada</div><h2 class="section-title">Cores prontas</h2><div class="presets" id="presets"></div></section>
+<section class="card"><h2 class="section-title">Cores prontas</h2><div class="presets" id="presets"></div></section>
 <section class="card"><div class="manual-head" onclick="toggleManual()"><div><h2 class="section-title" style="margin:0">Ajuste manual</h2><p>RGB e temperatura do branco</p></div><button id="toggle">Mostrar</button></div><div class="manual-body" id="manual" hidden><input type="color" id="picker" aria-label="Escolher cor"><div id="sliders"></div></div></section>
 <section class="card"><h2 class="section-title">Brilho máximo</h2><label><span>Limite</span><input type="range" id="i_limit" min="0" max="100" oninput="changeLimit()"><b id="v_limit">0%</b></label></section>
 <div class="actions"><button class="danger" onclick="off()">Apagar</button></div>
 <script>
 const N=['r','g','b','ww','cw'];
 const labels={r:'Vermelho',g:'Verde',b:'Azul',ww:'Branco quente',cw:'Branco frio'};
-const presets=[['Quente','#ff7a24',[255,70,0,0,0]],['Relaxar','#ffb347',[255,150,0,30,0]],['Natureza','#51c878',[20,255,80,0,0]],['Oceano','#2389da',[0,100,255,0,0]],['Noite','#7d4dcc',[80,0,255,0,0]],['Neutro','#ffffff',[0,0,0,110,145]],['Leitura','#fff5d6',[0,0,0,210,70]],['Festa','#ff3b81',[255,0,120,0,0]],['Céu','#6ec6ff',[0,90,255,0,0]],['Luz baixa','#ffd6a0',[100,40,0,25,0]]];
+const presets=[
+['Quente',[255,70,0,0,0]],['Relaxar',[255,150,0,30,0]],['Luz baixa',[100,40,0,25,0]],['Leitura',[0,0,0,210,70]],
+['Neutro',[0,0,0,110,145]],['Céu',[0,90,255,0,0]],['Água',[0,255,255,0,0]],['Oceano',[0,100,255,0,0]],
+['Natureza',[20,255,80,0,0]],['Limão',[150,255,0,0,0]],['Noite',[80,0,255,0,0]],['Festa',[255,0,120,0,0]]];
 const ovInfo={ok:['concluído','#22a355',[0,255,0]],ask:['precisa de você','#e6a100',[255,160,0]],busy:['trabalhando','#2f7bf6',[0,60,255]],err:['erro','#d33636',[255,0,0]]};
 const $=id=>document.getElementById(id);
 const el=k=>$('i_'+k);
 let tCh,tLim,hold=0,ov=null;
-$('presets').innerHTML=presets.map((p,i)=>`<button class="preset" onclick="applyPreset(${i})"><span class="swatch" style="background:${p[1]}"></span>${p[0]}</button>`).join('');
+const warm=[255,214,170],cool=[201,226,255];
+function rgbOf(v){return [0,1,2].map(i=>Math.min(255,Math.round(v[i]+warm[i]*v[3]/255+cool[i]*v[4]/255)))}
+$('presets').innerHTML=presets.map((p,i)=>{const c=rgbOf(p[1]);const dark=0.299*c[0]+0.587*c[1]+0.114*c[2]>150;return `<button class="preset" style="background:rgb(${c});color:${dark?'#18202a':'#fff'}" onclick="applyPreset(${i})">${p[0]}</button>`}).join('');
 $('sliders').innerHTML=N.map(k=>`<label><span>${labels[k]}</span><input type="range" id="i_${k}" min="0" max="255" oninput="changeColor()"><b id="v_${k}">0</b></label>`).join('');
-function api(q){return fetch(q+(q.includes('?')?'&':'?')+'_='+Date.now(),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})}
+let key='';try{key=localStorage.getItem('lk')||''}catch(e){}
+function api(q,retry){
+  const u=q+(q.includes('?')?'&':'?')+'_='+Date.now()+(key?'&key='+encodeURIComponent(key):'');
+  return fetch(u,{cache:'no-store'}).then(r=>{
+    if(r.status===403&&!retry){
+      const k=prompt('Chave de acesso da lâmpada:');
+      if(!k)throw new Error('sem chave');
+      key=k;try{localStorage.setItem('lk',k)}catch(e){}
+      return api(q,true);
+    }
+    if(r.status===403){key='';try{localStorage.removeItem('lk')}catch(e){}}
+    if(!r.ok)throw new Error(r.status);
+    return r.json();
+  });
+}
 function lab(k){$('v_'+k).textContent=k==='limit'?el(k).value+'%':el(k).value}
 function offline(){const f=$('flag');f.className='flag off';f.textContent='Sem conexão';f.style.removeProperty('--c');$('claudebar').hidden=true;ov=null}
 function touch(){hold=Date.now()+1500}
-function paintPreview(s){
-  const warm=[255,214,170],cool=[201,226,255];
-  const c=[0,1,2].map(i=>Math.min(255,Math.round(s[N[i]]+warm[i]*s.ww/255+cool[i]*s.cw/255)));
-  $('preview').style.background=`rgb(${c.join(',')})`;
-  $('preview').textContent=N.every(k=>s[k]===0)?'Desligada':'Ativa';
-  document.querySelectorAll('.preset').forEach((b,i)=>b.classList.toggle('selected',presets[i][2].every((v,j)=>v===s[N[j]])));
+function markPreset(s){
+  document.querySelectorAll('.preset').forEach((b,i)=>b.classList.toggle('selected',presets[i][1].every((v,j)=>v===s[N[j]])));
 }
 function localState(){const s={};N.forEach(k=>s[k]=+el(k).value);return s}
 function paintColors(s){
   N.forEach(k=>{el(k).value=s[k];lab(k)});
   el('limit').value=s.limit;lab('limit');
   $('picker').value='#'+N.slice(0,3).map(k=>Number(s[k]).toString(16).padStart(2,'0')).join('');
-  paintPreview(s);
+  markPreset(s);
 }
 function paintFlag(s){
   const f=$('flag'),bar=$('claudebar');
@@ -411,7 +440,6 @@ function paintFlag(s){
   const i=ovInfo[s.ov]||[s.ov,'#888',[128,128,128]];
   f.className='flag claude';f.style.setProperty('--c',i[1]);f.textContent='Claude · '+i[0];
   bar.hidden=false;bar.style.setProperty('--c',i[1]);$('cname').textContent='Claude · '+i[0];
-  $('preview').style.background=`rgb(${i[2].join(',')})`;$('preview').textContent='Claude · '+i[0];
   const end=Date.now()+s.ovMs;
   if(!ov||ov.name!==s.ov||ov.total!==s.ovTotal||Math.abs(ov.end-end)>700)ov={name:s.ov,end:end,total:s.ovTotal};
   tickBar();
@@ -430,9 +458,9 @@ function show(s,force){
   paintFlag(s);
 }
 function send(){clearTimeout(tCh);tCh=setTimeout(()=>api('/set?'+N.map(k=>k+'='+el(k).value).join('&')).then(s=>show(s)).catch(offline),70)}
-function changeColor(){N.forEach(lab);touch();paintPreview(localState());send()}
+function changeColor(){N.forEach(lab);touch();markPreset(localState());send()}
 function changeLimit(){lab('limit');touch();clearTimeout(tLim);tLim=setTimeout(()=>api('/set?limit='+el('limit').value).then(s=>show(s)).catch(offline),70)}
-function applyPreset(i){const v=presets[i][2];N.forEach((k,j)=>el(k).value=v[j]);changeColor()}
+function applyPreset(i){const v=presets[i][1];N.forEach((k,j)=>el(k).value=v[j]);changeColor()}
 function off(){hold=Date.now()+2000;api('/off').then(s=>{hold=0;show(s,true)}).catch(()=>{hold=0;offline()})}
 function toggleManual(){const x=$('manual');x.hidden=!x.hidden;$('toggle').textContent=x.hidden?'Mostrar':'Ocultar'}
 $('picker').oninput=e=>{N.slice(0,3).forEach((k,i)=>el(k).value=parseInt(e.target.value.substr(1+i*2,2),16));changeColor()};
@@ -466,7 +494,28 @@ static void sendState() {
   server.send(200, "application/json", j);
 }
 
+// Confere a chave (comparacao em tempo constante). Sem API_KEY definida, libera tudo.
+static bool authOk() {
+  const char* want = API_KEY;
+  size_t      n    = strlen(want);
+  if (n == 0) return true;
+  String  k    = server.arg("key");
+  uint8_t diff = (k.length() != n);
+  for (size_t i = 0; i < n; i++) diff |= (uint8_t)((i < k.length() ? k.charAt(i) : 0) ^ want[i]);
+  if (!diff) return true;
+  delay(300);  // freia tentativas em sequencia
+  server.send(403, "text/plain", "chave invalida");
+  return false;
+}
+
+static void handleOff() {
+  if (!authOk()) return;
+  allOff();
+  sendState();
+}
+
 static void handleSet() {
+  if (!authOk()) return;
   for (uint8_t i = 0; i < NUM_CH; i++)
     if (server.hasArg(ch[i].name)) setValue(i, server.arg(ch[i].name).toInt());
   if (server.hasArg("limit")) setLimit(server.arg("limit").toInt());
@@ -474,10 +523,7 @@ static void handleSet() {
 }
 
 static void handleClaude() {
-  if (strlen(CLAUDE_KEY) && !server.arg("key").equals(CLAUDE_KEY)) {
-    server.send(403, "text/plain", "chave invalida");
-    return;
-  }
+  if (!authOk()) return;
   int secs = server.hasArg("secs") ? constrain((int)server.arg("secs").toInt(), 0, 86400) : -1;
   if (!claudeSet(server.arg("state"), secs)) {
     server.send(400, "text/plain", "state invalido: ok|ask|busy|err|off");
@@ -515,7 +561,17 @@ static void startWifi() {
     Serial.println("include/secrets.h nao encontrado: sem Wi-Fi configurado.");
 #endif
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS);
+#ifdef AP_PASS
+    const char* apPass = AP_PASS;
+#else
+    static char apPass[11];
+    static const char cs[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    for (uint8_t i = 0; i < 10; i++) apPass[i] = cs[esp_random() % (sizeof(cs) - 1)];
+    apPass[10] = 0;
+    Serial.printf("AP_PASS nao definida no secrets.h. Senha do ponto de acesso nesta sessao: %s\n", apPass);
+#endif
+    if (!WiFi.softAP(AP_SSID, apPass))
+      Serial.println("ERRO: ponto de acesso nao iniciou (a senha precisa ter 8 a 63 caracteres).");
     Serial.printf("Modo AP '%s'. IP: %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
   }
   if (MDNS.begin(HOSTNAME)) Serial.printf("Tambem em http://%s.local\n", HOSTNAME);
@@ -542,7 +598,7 @@ void setup() {
   server.on("/set", handleSet);
   server.on("/state", sendState);
   server.on("/claude", handleClaude);
-  server.on("/off", []() { allOff(); sendState(); });
+  server.on("/off", handleOff);
   server.begin();
 
   Serial.println(HELP);

@@ -1,25 +1,55 @@
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command",
-        "command": "(curl -s --connect-timeout 1 -m 2 'http://lampada.local/claude?state=busy' >/dev/null 2>&1 &); true" } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(curl -s --connect-timeout 1 -m 2 \"http://lampada.local/claude?state=busy&key=$LAMPADA_KEY\" >/dev/null 2>&1 &); true"
+          }
+        ]
+      }
     ],
     "Notification": [
-      { "matcher": "permission_prompt|elicitation_dialog",
-        "hooks": [ { "type": "command",
-        "command": "(curl -s --connect-timeout 1 -m 2 'http://lampada.local/claude?state=ask' >/dev/null 2>&1 &); true" } ] }
+      {
+        "matcher": "permission_prompt|elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(curl -s --connect-timeout 1 -m 2 \"http://lampada.local/claude?state=ask&key=$LAMPADA_KEY\" >/dev/null 2>&1 &); true"
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command",
-        "command": "(curl -s --connect-timeout 1 -m 2 'http://lampada.local/claude?state=busy' >/dev/null 2>&1 &); true" } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(curl -s --connect-timeout 1 -m 2 \"http://lampada.local/claude?state=busy&key=$LAMPADA_KEY\" >/dev/null 2>&1 &); true"
+          }
+        ]
+      }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command",
-        "command": "(curl -s --connect-timeout 1 -m 2 'http://lampada.local/claude?state=ok' >/dev/null 2>&1 &); true" } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(curl -s --connect-timeout 1 -m 2 \"http://lampada.local/claude?state=ok&key=$LAMPADA_KEY\" >/dev/null 2>&1 &); true"
+          }
+        ]
+      }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command",
-        "command": "(curl -s --connect-timeout 1 -m 2 'http://lampada.local/claude?state=off' >/dev/null 2>&1 &); true" } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "(curl -s --connect-timeout 1 -m 2 \"http://lampada.local/claude?state=off&key=$LAMPADA_KEY\" >/dev/null 2>&1 &); true"
+          }
+        ]
+      }
     ]
   }
 }

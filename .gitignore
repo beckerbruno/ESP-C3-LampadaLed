@@ -2,3 +2,6 @@
 .vscode/
 include/secrets.h
 .DS_Store
+*.bak
+*.tmp
+.readme-add.tmp

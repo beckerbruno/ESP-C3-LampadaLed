@@ -19,7 +19,7 @@ Firmware para controlar a lâmpada LED (painel M140-RGB-DB: R, G, B, branco quen
 ## Primeiro uso
 
 1. Remova o MCU de 16 pinos da placa antiga e confirme o GND comum.
-2. Copie `include/secrets.example.h` para `include/secrets.h` e preencha o Wi-Fi (sem ele o ESP cria o ponto de acesso `LampadaLed`, senha `lampada1234`).
+2. Copie `include/secrets.example.h` para `include/secrets.h` e preencha o Wi-Fi (sem ele o ESP cria o ponto de acesso `LampadaLed`, com uma senha sorteada que aparece na serial).
 3. Compile e grave com PlatformIO:
    ```
    pio run -t upload
@@ -75,9 +75,17 @@ O ESP mostra o estado do Claude Code por cima da cor atual, por tempo limitado. 
 | `err` | vermelho | 30 s | erro (uso manual) |
 | `off` | — | — | cancela o aviso |
 
-- **HTTP:** `/claude?state=ok|ask|busy|err|off&secs=N` (`secs=0` = sem prazo; omita para usar o tempo padrão). Se definir `CLAUDE_KEY` no `config.h`, acrescente `&key=...`.
+- **HTTP:** `/claude?state=ok|ask|busy|err|off&secs=N` (`secs=0` = sem prazo; omita para usar o tempo padrão). Com `API_KEY` definida, acrescente `&key=...`.
 - **Serial:** `claude ok`, `claude ask 30`, `claude off`.
-- **Tempos e chave:** defina `CLAUDE_OK_SECS`, `CLAUDE_ASK_SECS`, `CLAUDE_BUSY_SECS`, `CLAUDE_ERR_SECS` e `CLAUDE_KEY` no `config.h`.
-- **Hooks:** copie o bloco `"hooks"` de `claude-hooks.json` para `~/.claude/settings.json` (ou `.claude/settings.json` do projeto). O Claude Code precisa estar na mesma rede Wi-Fi da lâmpada.
+- **Tempos:** defina `CLAUDE_OK_SECS`, `CLAUDE_ASK_SECS`, `CLAUDE_BUSY_SECS` e `CLAUDE_ERR_SECS` no `config.h`.
+- **Hooks:** copie o bloco `"hooks"` de `claude-hooks.json` para `~/.claude/settings.json`. Se usar `API_KEY`, guarde a chave fora do repositório, no mesmo arquivo: `"env": { "LAMPADA_KEY": "sua-chave" }` (os hooks leem `$LAMPADA_KEY`). O Claude Code precisa estar na mesma rede Wi-Fi da lâmpada.
 
 A página mostra, ao lado do título, uma etiqueta **Manual** ou **Claude · estado**. Quando há um aviso do Claude ativo, aparece também uma barra de progresso com o tempo restante, e a prévia mostra a cor do aviso. Sem prazo (`secs=0`), a barra pisca até o aviso ser cancelado.
+
+## Segurança
+
+- **Wi-Fi:** `include/secrets.h` guarda a rede e a senha e está no `.gitignore`. Nunca faça commit dele; antes de publicar, confira com `git ls-files | grep -i secrets` (deve listar só o `secrets.example.h`). Prefira uma rede de convidados ou de IoT.
+- **Ponto de acesso de emergência:** defina `AP_PASS` (8 a 63 caracteres) no `secrets.h`. Sem ela, o ESP sorteia uma senha a cada boot e a mostra na serial. Não existe senha fixa no código.
+- **Chave de acesso:** defina `API_KEY` no `secrets.h` e `/set`, `/off` e `/claude` passam a exigir `?key=...`. A página pede a chave na primeira vez e a guarda no navegador. A comunicação é HTTP simples: a chave protege contra uso casual, não contra quem escuta a rede.
+- **Nunca** encaminhe a porta 80 do roteador para o ESP. Ele deve ficar acessível só dentro da sua rede.
+- Quem tiver o aparelho fisicamente consegue ler o Wi-Fi gravado na memória dele pelo USB.
